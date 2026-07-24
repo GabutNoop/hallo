@@ -117,6 +117,20 @@ const BLOCKED_KEYWORDS = [
 function checkSafety(input) {
   const normalized = input.trim().toLowerCase();
 
+  // ── UNAUTHORIZED TARGET CHECK ──
+  // Block requests to exploit/hack third-party services
+  const unauthorizedPatterns = [
+    { pattern: /\b(celah|vulnerability|exploit|bypass|hack|crack|jebol|buka|bobol)\b.*\b(api|key|token|password|login|auth|payment|billing)\b/i, reason: 'Mencari celah keamanan pada layanan pihak ketiga tanpa izin = illegal (UU ITE Pasal 30)' },
+    { pattern: /\b(free|gratis|unlimited)\b.*\b(api|key|token|access|akses)\b.*\b(bypass|hack|exploit|celah)\b/i, reason: 'Mengakali sistem pembayaran layanan pihak ketiga = pencurian layanan' },
+    { pattern: /\b(hack|crack|exploit|bobol|jebol)\b.*\b(openrouter|openai|anthropic|google|microsoft|aws|oracle|cloudflare)\b/i, reason: 'Menyerang infrastruktur perusahaan tanpa izin = unauthorized access' },
+  ];
+
+  for (const { pattern, reason } of unauthorizedPatterns) {
+    if (pattern.test(input)) {
+      return { safe: false, reason, blocked_pattern: pattern.toString() };
+    }
+  }
+
   // Check blocked keywords first (exact match)
   for (const keyword of BLOCKED_KEYWORDS) {
     if (normalized.includes(keyword.toLowerCase())) {
