@@ -1,0 +1,1 @@
+import { articles } from '@/lib/content'; export async function GET(){ const issues=articles.flatMap(a=>[a.sources.length<3?`${a.slug}: kurang dari tiga sumber`:null,a.excerpt.length>160?`${a.slug}: meta description terlalu panjang`:null].filter(Boolean)); return Response.json({ ok:issues.length===0, articles:articles.length, issues }); }

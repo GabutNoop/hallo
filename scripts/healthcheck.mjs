@@ -1,0 +1,1 @@
+const url=process.env.HEALTHCHECK_URL || 'http://localhost:3000/api/health'; try { const response=await fetch(url); if(!response.ok) throw new Error(`HTTP ${response.status}`); console.log(await response.text()); } catch(error){ console.error(`Health check failed: ${error.message}`); process.exit(1); }

@@ -1,0 +1,1 @@
+module.exports = { apps: [{ name: 'hallo-news', script: 'node_modules/next/dist/bin/next', args: 'start -p 3000', cwd: __dirname, env: { NODE_ENV: 'production' }, autorestart: true, max_memory_restart: '500M' }] };

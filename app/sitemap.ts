@@ -1,0 +1,2 @@
+import type { MetadataRoute } from 'next'; import { articles } from '@/lib/content';
+export default function sitemap(): MetadataRoute.Sitemap { const base=process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'; return ['','/tentang-kami','/hubungi-kami','/kebijakan-privasi','/syarat-ketentuan','/disclaimer',...articles.map(a=>`/artikel/${a.slug}`)].map(url=>({url:`${base}${url}`,lastModified:new Date()})); }
