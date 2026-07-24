@@ -1,139 +1,168 @@
-# RedOps — Security Analysis Orchestrator
+# RedOps v2.0 — Real Security Analysis Engine
 
-> Authorized security assessment framework with AI-powered prompt generation.
+> Zero-dependency CLI tool for authorized security reconnaissance and assessment.
 
-## Overview
+## Features
 
-RedOps is a Node.js framework for orchestrating security assessments on **authorized targets only**. It provides:
-
-- **Target Registration** — Register and track authorized assessment targets
-- **Finding Management** — Log, classify, and triage vulnerability findings
-- **VPS Infrastructure Audit** — Analyze server hardening and open ports
-- **Master Security Prompt** — Generate comprehensive AI analysis prompts
-- **Report Generation** — Produce structured security reports with risk dashboards
-- **HITL Workflow** — Human-In-The-Loop approval for all active scans
+- **Real DNS Recon** — A, AAAA, MX, TXT, NS, CNAME resolution
+- **Real Port Scanner** — TCP connect scan with concurrency control
+- **Real SSL/TLS Analysis** — Certificate chain, cipher, expiry, self-signed detection
+- **Real HTTP Analysis** — Security headers scoring, tech fingerprinting, info leakage
+- **Real WHOIS/RDAP** — Domain registration data via RDAP protocol
+- **Exposed File Detection** — 40+ sensitive file paths checked
+- **Persistent Storage** — JSON file-based, survives restarts
+- **Rate Limiting** — Built-in throttle (5/sec, 60/min)
+- **CLI Tool** — Zero dependencies, works out of the box
+- **AI Prompt Generation** — Structured 5-phase security analysis prompts
+- **Report Generation** — Risk dashboards, scoring, remediation roadmaps
 
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone <repo-url>
-cd hallo
+# No npm install needed — zero dependencies!
 
-# Run the demo
-npm run demo
+# Register a target
+node src/cli add example.com --owner "Acme Corp"
 
-# Run tests
-npm test
+# Run passive recon
+node src/cli recon example.com
+
+# Full assessment
+node src/cli scan example.com
+
+# View findings
+node src/cli findings example.com
+
+# Generate report
+node src/cli report example.com --output report.json
+
+# Generate AI prompt
+node src/cli prompt example.com --output prompt.txt
 ```
 
-## Usage
+## CLI Commands
 
-```javascript
-const { RedOps } = require('./src');
+```
+TARGET MANAGEMENT
+  add <domain>           Register authorized target
+  list / ls              List all registered targets
+  remove / rm <domain>   Remove target and all data
 
-const redops = new RedOps();
+RECONNAISSANCE
+  recon <domain>         Passive recon (DNS, headers, SSL, WHOIS)
+  ports <domain>         TCP port scan (--profile web|full)
+  files <domain>         Detect exposed sensitive files
+  scan <domain>          Full assessment (recon + ports + files)
 
-// Register an authorized target
-redops.registerTarget({
-  domain: 'example.com',
-  owner: 'Acme Corp',
-  scope: 'Web Application + API',
-  auth_type: 'Written Authorization',
-  tech_stack: 'Next.js + Express + PostgreSQL',
-});
+FINDINGS
+  findings <domain>      List findings (--severity, --status)
 
-// Add findings
-redops.addFinding('example.com', {
-  title: 'JWT Token Not Validated Server-Side',
-  severity: 'critical',
-  cvss: 9.1,
-  owasp: 'A07:2021',
-  status: 'confirmed',
-  proof: 'JWT with alg:none accepted by /api/v1/admin',
-  remediation: 'Validate JWT signature, reject alg:none',
-});
+REPORTS
+  report <domain>        Generate security report
+  prompt <domain>        Generate AI analysis prompt
+  export                 Export all data as JSON
 
-// Register VPS infrastructure
-redops.registerVPS({
-  hostname: 'web-prod-01',
-  ip: '203.0.113.42',
-  open_ports: [22, 80, 443, 6379],
-  hardening_score: 62,
-});
+GLOBAL OPTIONS
+  --json                 JSON output
+  --data-dir <path>      Custom data directory
+  --verbose              Verbose logging
+  --help                 Show help
+```
 
-// Generate master security prompt for AI analysis
-const prompt = redops.generatePrompt('example.com');
-console.log(prompt);
+## Examples
 
-// Get risk summary
-const summary = redops.getRiskSummary('example.com');
-console.log(summary);
+```bash
+# Register with metadata
+node src/cli add target.com --owner "My Company" --scope "Web + API" --auth "Written Auth"
+
+# Recon with JSON output
+node src/cli recon target.com --json
+
+# Full port scan
+node src/cli ports target.com --profile full --timeout 5000
+
+# Full assessment
+node src/cli scan target.com --full --timeout 15000
+
+# Filter findings
+node src/cli findings target.com --severity critical --json
+
+# Save report
+node src/cli report target.com --output report.json
+
+# Save AI prompt
+node src/cli prompt target.com --output prompt.txt
 ```
 
 ## Project Structure
 
 ```
 ├── src/
-│   ├── index.js              # RedOps orchestrator
-│   ├── example.js            # Usage demonstration
+│   ├── cli/
+│   │   └── index.js              # CLI entry point with all commands
+│   ├── index.js                  # RedOps orchestrator (v2)
+│   ├── net/
+│   │   └── index.js              # Real network modules (DNS, TCP, SSL, HTTP, RDAP)
+│   ├── storage/
+│   │   └── index.js              # Persistent JSON file storage
 │   ├── prompts/
 │   │   └── masterSecurityPrompt.js  # AI prompt builder
-│   ├── models/
-│   │   ├── target.js         # Target model
-│   │   ├── finding.js        # Vulnerability finding model
-│   │   └── vps.js            # VPS infrastructure model
-│   ├── scanner/
-│   │   └── index.js          # Scanner with HITL workflow
-│   ├── recon/
-│   │   └── index.js          # Passive recon module
 │   ├── report/
-│   │   └── index.js          # Report generator
+│   │   └── index.js              # Report generator
+│   ├── models/
+│   │   ├── target.js             # Target model
+│   │   ├── finding.js            # Finding model
+│   │   └── vps.js                # VPS model
+│   ├── recon/
+│   │   └── index.js              # Recon helpers
+│   ├── scanner/
+│   │   └── index.js              # Scanner with HITL workflow
 │   ├── utils/
-│   │   └── logger.js         # Structured logger
+│   │   └── logger.js             # Structured logger
 │   └── __tests__/
-│       └── test.js           # Test suite
+│       └── test.js               # Test suite (real network tests)
 ├── docs/
-│   └── install-claude-code.md # Claude Code setup guide (ID)
+│   └── install-claude-code.md    # Claude Code setup guide (ID)
+├── data/                         # Persistent data (auto-created)
 └── package.json
 ```
 
-## Modules
+## Network Modules (Real)
 
-### Models
-- **Target** — Authorized assessment target with validation
-- **Finding** — Vulnerability finding with severity, CVSS, OWASP, MITRE mapping
-- **VPS** — Infrastructure node with port risk analysis and health assessment
+| Module | Description | Method |
+|--------|-------------|--------|
+| `resolveDns(domain)` | Full DNS resolution | `dns` built-in |
+| `scanPorts(host, ports)` | TCP connect scan | `net.Socket` |
+| `analyzeSsl(host)` | Certificate inspection | `tls.connect` |
+| `analyzeHeaders(url)` | HTTP header analysis | `https.request` |
+| `detectExposedFiles(url)` | Sensitive file detection | `https.request` |
+| `whoisRdap(domain)` | RDAP domain lookup | RDAP protocol |
 
-### Prompt Builder
-Generates a structured 5-phase security analysis prompt:
-1. **Recon & Surface Mapping** — Entry points, tech fingerprint, auth mechanisms
-2. **Threat Modeling** — Attack vectors by category (auth, input, API, infra)
-3. **Vulnerability Triage** — Finding analysis with CVSS/OWASP/MITRE mapping
-4. **VPS & Infrastructure** — Port audit, hardening review
-5. **Report Generation** — Executive summary, risk dashboard, remediation roadmap
+## Rate Limiting
 
-### Scanner
-- Passive recon (header analysis, tech fingerprinting)
-- Active scan requests require **HITL approval**
-- Security header analysis with scoring
+Built-in rate limiter prevents overwhelming targets:
+- **5 requests/second** default
+- **60 requests/minute** default
+- Configurable via constructor options
 
-### Report Generator
-- Risk dashboard by category
-- Security score calculation (0-100)
-- Remediation roadmap (immediate / short-term / medium-term)
+## Security Rules
 
-## Strict Rules
-
-1. Only analyze authorized targets
+1. Only analyze **authorized** targets
 2. Never pivot to external systems
-3. Flag HITL before ANY active exploitation
+3. Active exploitation requires HITL approval
 4. No destructive payloads
-5. Stop if real PII/credentials discovered — report immediately
+5. Stop if PII/credentials discovered — report immediately
+
+## Testing
+
+```bash
+# Run all tests (includes real network tests)
+npm test
+```
 
 ## Documentation
 
-- [Cara Install Claude Code](docs/install-claude-code.md) — Panduan setup Claude Code (Bahasa Indonesia)
+- [Cara Install Claude Code](docs/install-claude-code.md) — Panduan setup (Bahasa Indonesia)
 
 ## License
 

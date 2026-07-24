@@ -1,20 +1,24 @@
 {
   "name": "redops",
-  "version": "1.0.0",
-  "description": "RedOps — Security Analysis Orchestrator for authorized penetration testing",
+  "version": "2.0.0",
+  "description": "RedOps — Real Security Analysis Engine for authorized penetration testing",
   "main": "src/index.js",
+  "bin": {
+    "redops": "./src/cli/index.js"
+  },
   "scripts": {
     "test": "node src/__tests__/test.js",
-    "demo": "node src/example.js",
-    "start": "node src/index.js"
+    "start": "node src/cli/index.js"
   },
   "keywords": [
     "security",
     "pentest",
     "vulnerability",
     "assessment",
-    "redops",
-    "recon"
+    "recon",
+    "scanner",
+    "cli",
+    "redops"
   ],
   "author": "GabutNoop",
   "license": "MIT",
