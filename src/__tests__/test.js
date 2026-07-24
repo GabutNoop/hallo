@@ -46,6 +46,8 @@ const { RateLimiter, resolveDns, scanPorts, analyzeSsl, analyzeHeaders, whoisRda
 const { buildMasterSecurityPrompt } = require('../prompts/masterSecurityPrompt');
 const { ReportGenerator } = require('../report');
 const { RedOps } = require('..');
+const { checkSafety, sanitize, getAllowedOperations } = require('../web/guard');
+const { Chatbot } = require('../web/chatbot');
 
 async function runTests() {
 
@@ -195,6 +197,171 @@ async function runTests() {
       const result = await whoisRdap('google.com');
       assert.strictEqual(result.domain, 'google.com');
       // RDAP might not always return registrar
+      assert.ok(result.timestamp);
+    });
+  });
+
+  // ── Guard Tests ──
+  await describe('Safety Guard', async () => {
+    await test('should block rm -rf /', () => {
+      const result = checkSafety('rm -rf /');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block rm -rf /home', () => {
+      const result = checkSafety('rm -rf /home/user');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block shutdown', () => {
+      const result = checkSafety('shutdown now');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block reboot', () => {
+      const result = checkSafety('reboot');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block DROP DATABASE', () => {
+      const result = checkSafety('DROP DATABASE production');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block kill -9', () => {
+      const result = checkSafety('kill -9 1234');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block fork bomb', () => {
+      const result = checkSafety(':(){ :|:& };:');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block sudo commands', () => {
+      const result = checkSafety('sudo apt install something');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block shell execution', () => {
+      const result = checkSafety('bash -c "echo hello"');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block iptables flush', () => {
+      const result = checkSafety('iptables -F');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block reverse shells', () => {
+      const result = checkSafety('nc -lp 4444');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should block credential access', () => {
+      const result = checkSafety('cat /etc/shadow');
+      assert.strictEqual(result.safe, false);
+    });
+
+    await test('should allow recon commands', () => {
+      assert.strictEqual(checkSafety('recon example.com').safe, true);
+      assert.strictEqual(checkSafety('dns google.com').safe, true);
+      assert.strictEqual(checkSafety('help').safe, true);
+      assert.strictEqual(checkSafety('list').safe, true);
+      assert.strictEqual(checkSafety('status').safe, true);
+    });
+
+    await test('should sanitize shell metacharacters', () => {
+      const result = sanitize('test; rm -rf /');
+      assert.ok(!result.includes(';'));
+    });
+
+    await test('should sanitize path traversal', () => {
+      const result = sanitize('../../etc/passwd');
+      assert.ok(!result.includes('../'));
+    });
+
+    await test('should return allowed operations', () => {
+      const ops = getAllowedOperations();
+      assert.ok(ops.targets);
+      assert.ok(ops.recon);
+      assert.ok(ops.scanning);
+      assert.ok(ops.findings);
+      assert.ok(ops.reports);
+    });
+  });
+
+  // ── Chatbot Tests ──
+  await describe('Chatbot', async () => {
+    await test('should respond to help', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('help');
+      assert.strictEqual(result.type, 'text');
+      assert.ok(result.text.includes('RedOps'));
+    });
+
+    await test('should block dangerous commands', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('rm -rf /');
+      assert.strictEqual(result.blocked, true);
+      assert.ok(result.text.includes('BLOCKED'));
+    });
+
+    await test('should add target via chat', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('add example.com');
+      assert.strictEqual(result.type, 'success');
+      assert.ok(result.text.includes('example.com'));
+    });
+
+    await test('should list targets', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      await bot.processMessage('add test1.com');
+      await bot.processMessage('add test2.com');
+      const result = await bot.processMessage('list');
+      assert.ok(result.text.includes('test1.com'));
+      assert.ok(result.text.includes('test2.com'));
+    });
+
+    await test('should show status', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('status');
+      assert.ok(result.text.includes('RedOps'));
+      assert.ok(result.text.includes('Safety Guard'));
+    });
+
+    await test('should understand Indonesian commands', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('bantuan');
+      assert.strictEqual(result.command, 'help');
+    });
+
+    await test('should handle unknown commands gracefully', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('xyzrandomcommand');
+      assert.ok(result.text.includes('tidak mengerti'));
+    });
+
+    await test('should resolve DNS via chat', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('dns google.com');
+      assert.strictEqual(result.type, 'dns');
+      assert.ok(result.data);
+      assert.ok(result.data.a.length > 0);
+    });
+
+    await test('should export data via chat', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      await bot.processMessage('add export-test.com');
+      const result = await bot.processMessage('export');
+      assert.strictEqual(result.type, 'export');
+      assert.ok(result.data);
+    });
+
+    await test('should include duration in response', async () => {
+      const bot = new Chatbot({ dataDir: path.join(tmpDir, 'bot_' + Date.now()) });
+      const result = await bot.processMessage('help');
+      assert.ok(typeof result.duration_ms === 'number');
       assert.ok(result.timestamp);
     });
   });

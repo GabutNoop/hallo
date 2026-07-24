@@ -445,6 +445,34 @@ async function cmdRemove(args, redops) {
   console.log(colorize(`✓ Target removed: ${domain}`, 'green'));
 }
 
+async function cmdWeb(args) {
+  const { WebServer } = require('../web/server');
+
+  const port = parseInt(args.flags.port || args.flags.p) || 3000;
+  const host = args.flags.host || '0.0.0.0';
+
+  const server = new WebServer({
+    port,
+    host,
+    dataDir: args.flags['data-dir'] || path.join(process.cwd(), 'data'),
+    verbose: !!args.flags.verbose,
+  });
+
+  try {
+    await server.start();
+    console.log(colorize(`\n🛡️  RedOps Web Chatbot`, 'bold'));
+    console.log(colorize(`${'─'.repeat(40)}`, 'dim'));
+    console.log(`  URL     : ${colorize(`http://localhost:${port}`, 'cyan')}`);
+    console.log(`  API     : ${colorize(`http://localhost:${port}/api`, 'cyan')}`);
+    console.log(`  Data Dir: ${server.chatbot.redops.dataDir}`);
+    console.log(colorize(`${'─'.repeat(40)}`, 'dim'));
+    console.log(colorize('  Press Ctrl+C to stop\n', 'dim'));
+  } catch (err) {
+    console.error(colorize(`Failed to start web server: ${err.message}`, 'red'));
+    process.exit(1);
+  }
+}
+
 function cmdHelp() {
   printBanner();
   console.log(`
@@ -486,6 +514,11 @@ ${colorize('DATA', 'bold')}
   ${colorize('export', 'cyan')}               Export all data as JSON
     --output <file>             Output file path
 
+${colorize('WEB CHATBOT', 'bold')}
+  ${colorize('web', 'cyan')}                  Start web chatbot server
+    --port <port>               Port (default: 3000)
+    --host <host>               Host (default: 0.0.0.0)
+
 ${colorize('GLOBAL OPTIONS', 'bold')}
   --json                       Output as JSON
   --data-dir <path>            Custom data directory
@@ -498,6 +531,7 @@ ${colorize('EXAMPLES', 'bold')}
   redops scan example.com --full
   redops report example.com --output report.json
   redops prompt example.com --output prompt.txt
+  redops web --port 8080
 `);
 }
 
@@ -533,6 +567,8 @@ async function main() {
     export: cmdExport,
     remove: cmdRemove,
     rm: cmdRemove,
+    web: cmdWeb,
+    server: cmdWeb,
   };
 
   const handler = commands[command];
