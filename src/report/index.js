@@ -1,6 +1,12 @@
 'use strict';
 
-const { Severity } = require('../models/finding');
+const Severity = {
+  CRITICAL: 'critical',
+  HIGH: 'high',
+  MEDIUM: 'medium',
+  LOW: 'low',
+  INFO: 'info',
+};
 
 /**
  * Report generator — produces structured security reports.
