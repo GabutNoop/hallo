@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+huggingface-hub
+transformers
+torch
+accelerate
+python-dotenv
+aiohttp
+pydantic
+sse-starlette

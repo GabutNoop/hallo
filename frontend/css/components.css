@@ -1,0 +1,10 @@
+/* Component styles */
+.glass { background: rgba(255,255,255,0.04); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.06); }
+
+.card { background: var(--surface-2); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+
+.markdown h1, .markdown h2, .markdown h3 { margin: 12px 0 6px; }
+.markdown p { margin: 8px 0; }
+.markdown pre { background: #0d1117; padding: 14px; border-radius: 10px; overflow-x: auto; font-size: 13px; }
+.markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 6px; font-size: 13px; }
+.markdown ul { padding-left: 18px; margin: 8px 0; }

@@ -1,0 +1,10 @@
+@media (max-width: 1024px) {
+  .sidebar { position: absolute; z-index: 80; height: 100%; box-shadow: 8px 0 24px rgba(0,0,0,0.4); }
+  .sidebar.collapsed { transform: translateX(-100%); }
+}
+@media (max-width: 640px) {
+  .main { padding: 0; }
+  .header { padding: 0 16px; }
+  .chat-area { padding: 16px; }
+  .input-area { padding: 12px; }
+}

@@ -1,0 +1,12 @@
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.typing-cursor::after {
+  content: '|'; animation: blink 1s step-end infinite; color: var(--primary); margin-left: 2px;
+}
+@keyframes blink { 50% { opacity: 0; } }

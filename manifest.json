@@ -1,0 +1,9 @@
+{
+  "name": "Hallo — AI Chatbot",
+  "short_name": "Hallo",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0f0f12",
+  "theme_color": "#7c3aed",
+  "icons": [{"src":"assets/logo.svg","sizes":"192x192"}]
+}
