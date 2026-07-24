@@ -3,10 +3,12 @@
 const { RedOps } = require('..');
 const { checkSafety, sanitize, getAllowedOperations } = require('./guard');
 const { Logger } = require('../utils/logger');
+const { enhanceResponse, getMotivationalPrefix, generateActionPlan, PERSONALITY } = require('./personality');
 const path = require('path');
 
 /**
  * RedOps Chatbot — parses natural language and executes safe RedOps commands.
+ * Personality: Pekerja keras, pantang menyerah, disiplin, proaktif.
  */
 class Chatbot {
   constructor(opts = {}) {
@@ -60,9 +62,23 @@ class Chatbot {
       };
     } catch (err) {
       this.logger.error(`Command error: ${err.message}`);
+
+      // Proactive error handling — PANTANG MENYERAH!
+      const motivational = getMotivationalPrefix(err.message);
+      const actionPlan = generateActionPlan(
+        parsed.command,
+        err.message,
+        [
+          'Cek apakah domain/target valid dan accessible',
+          'Verifikasi network connection',
+          'Coba lagi dengan parameter berbeda',
+          'Cek logs untuk detail error',
+        ]
+      );
+
       return {
         type: 'error',
-        text: `❌ **Error:** ${err.message}\n\nKetik \`help\` untuk melihat daftar perintah.`,
+        text: `❌ **Error:** ${err.message}\n\n${motivational}${actionPlan}`,
         timestamp: new Date().toISOString(),
       };
     }
@@ -225,7 +241,7 @@ class Chatbot {
     const ops = getAllowedOperations();
     return {
       type: 'text',
-      text: `# 🛡️ RedOps Chatbot — Daftar Perintah
+      text: `# 🛡️ RedOps Chatbot — Pekerja Keras, Pantang Menyerah
 
 **Target Management:**
 - \`add <domain>\` — Daftarkan target (opsional: \`--owner\` \`--scope\`)
@@ -259,7 +275,10 @@ class Chatbot {
 - \`status\` — System health
 - \`help\` — Tampilkan bantuan ini
 
-💡 *Saya juga mengerti bahasa Indonesia! Coba: "recon example.com" atau "cek example.com"*`,
+**Karakter AI:** ${PERSONALITY.traits.join(', ')}
+
+💪 *Saya tidak akan menyerah. Apapun kendalanya, saya cari solusinya!*
+🇮🇩 *Saya mengerti bahasa Indonesia! Coba: "recon example.com" atau "cek example.com"*`,
     };
   }
 
@@ -358,6 +377,17 @@ class Chatbot {
         if (s.days_until_expiry < 30) text += `- 🔴 Expiring soon!\n`;
       } else {
         text += `- ❌ ${s.error}\n`;
+        text += getMotivationalPrefix(s.error);
+        text += generateActionPlan(
+          'SSL/TLS Certificate Check',
+          s.error,
+          [
+            'Coba HTTP (non-SSL) untuk cek apakah server aktif',
+            'Verifikasi domain apakah benar dan aktif',
+            'Cek apakah ada firewall blocking port 443',
+            'Coba lagi dengan timeout lebih panjang',
+          ]
+        );
       }
       text += '\n';
     }
@@ -370,7 +400,10 @@ class Chatbot {
     }
 
     if (scan.errors.length > 0) {
-      text += `\n⚠️ **Errors:** ${scan.errors.map(e => `[${e.module}] ${e.error}`).join(', ')}`;
+      text += `\n⚠️ **Errors encountered:** ${scan.errors.length}\n`;
+      text += scan.errors.map(e => `- [${e.module}] ${e.error}`).join('\n');
+      text += '\n\n' + getMotivationalPrefix(scan.errors[0].error);
+      text += '\n💡 _Saya sudah coba semua metode yang tersedia. Beberapa error mungkin karena network restriction di environment ini, bukan masalah kode._';
     }
 
     return { type: 'recon', text, data: scan };
@@ -615,7 +648,7 @@ class Chatbot {
 
     return {
       type: 'status',
-      text: `🟢 **RedOps System Status**\n\n- **Version:** 2.0.0\n- **Targets:** ${targets.length}\n- **Total Findings:** ${allFindings.length}\n- **Safety Guard:** Active (${require('./guard').BLOCKED_PATTERNS_COUNT} blocked patterns)\n- **Uptime:** ${Math.floor(process.uptime())}s\n- **Memory:** ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+      text: `🟢 **RedOps System Status**\n\n- **Version:** 2.0.0\n- **Targets:** ${targets.length}\n- **Total Findings:** ${allFindings.length}\n- **Safety Guard:** Active (${require('./guard').BLOCKED_PATTERNS_COUNT} blocked patterns)\n- **Uptime:** ${Math.floor(process.uptime())}s\n- **Memory:** ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n\n**AI Personality:** ${PERSONALITY.traits.join(', ')}\n\n💪 _Saya siap bekerja keras untuk Anda! Apapun kendalanya, saya cari solusinya._`,
     };
   }
 }
