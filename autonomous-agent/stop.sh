@@ -15,10 +15,16 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Detect $DOCKER_COMPOSE command
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+fi
+
 echo -e "${BLUE}[i]${NC} Stopping all services..."
 
 # Stop containers
-docker-compose down
+$DOCKER_COMPOSE down
 
 echo -e "${GREEN}[✓]${NC} All services stopped"
 echo ""

@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # ── Configuration ─────────────────────────────────────────────────────
-MODEL_NAME="hf.co/TrevorJS/gemma-4-26B-A4B-it-uncensored-GGUF:Q4_K_M"
+MODEL_NAME="hf.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Q4_K_M"
 OLLAMA_CONTAINER="agent-ollama"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${PROJECT_DIR}/setup.log"
@@ -63,6 +63,20 @@ spinner() {
 check_command() {
     command -v "$1" >/dev/null 2>&1
 }
+
+# ── Docker Compose Detection ──────────────────────────────────────────
+# Detect if using 'docker compose' (v2) or 'docker-compose' (v1)
+get_docker_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        echo "docker compose"
+    elif docker-compose version >/dev/null 2>&1; then
+        echo "docker-compose"
+    else
+        # Default to 'docker compose' for new installations
+        echo "docker compose"
+    fi
+}
+DOCKER_COMPOSE=$(get_docker_compose)
 
 # ── System Detection ──────────────────────────────────────────────────
 detect_os() {
@@ -161,6 +175,9 @@ install_docker() {
         sudo systemctl start docker 2>/dev/null || true
         sudo systemctl enable docker 2>/dev/null || true
     fi
+
+    # Update DOCKER_COMPOSE after potential installation
+    DOCKER_COMPOSE=$(get_docker_compose)
     
     # Verify installation
     if check_command docker; then
@@ -331,11 +348,11 @@ start_services() {
     
     # Build Docker images
     info "Building Docker images..."
-    docker-compose build --no-cache
+    $DOCKER_COMPOSE build --no-cache
     
     # Start services
     info "Starting services..."
-    docker-compose up -d
+    $DOCKER_COMPOSE up -d
     
     # Wait for services to be healthy
     info "Waiting for services to start..."
@@ -348,7 +365,7 @@ start_services() {
             break
         fi
         if [ $i -eq 30 ]; then
-            warn "Backend service may not be ready yet. Check logs with: docker-compose logs backend"
+            warn "Backend service may not be ready yet. Check logs with: $DOCKER_COMPOSE logs backend"
         fi
         sleep 2
     done
@@ -359,7 +376,7 @@ start_services() {
             break
         fi
         if [ $i -eq 10 ]; then
-            warn "Frontend service may not be ready yet. Check logs with: docker-compose logs frontend"
+            warn "Frontend service may not be ready yet. Check logs with: $DOCKER_COMPOSE logs frontend"
         fi
         sleep 2
     done
@@ -463,10 +480,10 @@ EOF
     ║       http://localhost:3000                              ║
     ║                                                           ║
     ║   📝  To view logs:                                      ║
-    ║       docker-compose logs -f                             ║
+    ║       $DOCKER_COMPOSE logs -f                             ║
     ║                                                           ║
     ║   🛑  To stop:                                           ║
-    ║       docker-compose down                                ║
+    ║       $DOCKER_COMPOSE down                                ║
     ║                                                           ║
     ╚═══════════════════════════════════════════════════════════╝
 EOF

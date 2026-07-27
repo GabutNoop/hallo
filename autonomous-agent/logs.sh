@@ -14,6 +14,12 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Detect $DOCKER_COMPOSE command
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+fi
+
 # Parse arguments
 SERVICE="${1:-all}"
 
@@ -22,13 +28,13 @@ echo -e "${YELLOW}[i]${NC} Press Ctrl+C to exit"
 echo ""
 
 if [ "$SERVICE" = "all" ]; then
-    docker-compose logs -f
+    $DOCKER_COMPOSE logs -f
 elif [ "$SERVICE" = "backend" ]; then
-    docker-compose logs -f backend
+    $DOCKER_COMPOSE logs -f backend
 elif [ "$SERVICE" = "frontend" ]; then
-    docker-compose logs -f frontend
+    $DOCKER_COMPOSE logs -f frontend
 elif [ "$SERVICE" = "ollama" ]; then
-    docker-compose logs -f ollama
+    $DOCKER_COMPOSE logs -f ollama
 else
     echo "Usage: $0 [all|backend|frontend|ollama]"
     exit 1
