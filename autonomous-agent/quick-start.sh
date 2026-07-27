@@ -16,6 +16,12 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Detect $DOCKER_COMPOSE command
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+fi
+
 echo -e "${BLUE}${BOLD}"
 cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
@@ -27,7 +33,7 @@ EOF
 echo -e "${NC}"
 
 # Check if services are already running
-if docker-compose ps | grep -q "Up"; then
+if $DOCKER_COMPOSE ps | grep -q "Up"; then
     echo -e "${YELLOW}[!]${NC} Services are already running!"
     echo -e "${BLUE}[i]${NC} Access at: http://localhost:3000"
     echo ""
@@ -37,12 +43,12 @@ if docker-compose ps | grep -q "Up"; then
         exit 0
     fi
     echo -e "${BLUE}[i]${NC} Stopping existing services..."
-    docker-compose down
+    $DOCKER_COMPOSE down
 fi
 
 # Start services
 echo -e "${GREEN}[✓]${NC} Starting all services..."
-docker-compose up -d
+$DOCKER_COMPOSE up -d
 
 # Wait for services
 echo -e "${BLUE}[i]${NC} Waiting for services to be ready..."

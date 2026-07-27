@@ -16,6 +16,12 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Detect $DOCKER_COMPOSE command
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+fi
+
 echo -e "${BLUE}${BOLD}"
 cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
@@ -38,7 +44,7 @@ fi
 # Check containers
 echo ""
 echo -e "${BLUE}[i]${NC} Container Status:"
-docker-compose ps
+$DOCKER_COMPOSE ps
 
 # Check Ollama
 echo ""

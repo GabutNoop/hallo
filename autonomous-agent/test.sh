@@ -16,6 +16,12 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Detect $DOCKER_COMPOSE command
+DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+fi
+
 echo -e "${BLUE}${BOLD}"
 cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
@@ -57,7 +63,7 @@ echo ""
 run_test "Docker is running" "docker ps"
 
 # 2. Docker Compose
-run_test "Docker Compose is available" "docker-compose version"
+run_test "Docker Compose is available" "$DOCKER_COMPOSE version"
 
 # 3. Containers
 run_test "Ollama container is running" "docker ps | grep agent-ollama"
