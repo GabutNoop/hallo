@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # ── Configuration ─────────────────────────────────────────────────────
-MODEL_NAME="hf.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Q4_K_M"
+MODEL_NAME="hf.co/TrevorJS/gemma-4-26B-A4B-it-uncensored-GGUF:Q4_K_M"
 OLLAMA_CONTAINER="agent-ollama"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${PROJECT_DIR}/setup.log"
