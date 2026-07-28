@@ -1,0 +1,16 @@
+# env
+.env
+setup.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# node / next
+node_modules/
+.next/
+out/
+npm-debug.log*
+tsconfig.tsbuildinfo
