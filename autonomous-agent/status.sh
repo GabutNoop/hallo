@@ -1,94 +1,67 @@
 #!/bin/bash
-
 # ──────────────────────────────────────────────────────────────────────
-# Status Check Script
+# Cek status seluruh stack
 # ──────────────────────────────────────────────────────────────────────
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+cd "$SCRIPT_DIR"
 
-set -e
-
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_DIR"
-
-# Detect $DOCKER_COMPOSE command
-DOCKER_COMPOSE="docker compose"
-if ! docker compose version >/dev/null 2>&1; then
-    DOCKER_COMPOSE="$DOCKER_COMPOSE"
-fi
+require_docker
+load_env
+DOCKER_COMPOSE="$(detect_compose)"
+MODEL="$(model_name)"
 
 echo -e "${BLUE}${BOLD}"
-cat << "EOF"
+cat << "BANNER"
     ╔═══════════════════════════════════════════════════════════╗
-    ║                                                           ║
-    ║   📊  SYSTEM STATUS CHECK                                ║
-    ║                                                           ║
+    ║   📊  STATUS SISTEM                                       ║
     ╚═══════════════════════════════════════════════════════════╝
-EOF
+BANNER
 echo -e "${NC}"
 
-# Check Docker
-echo -e "${BLUE}[i]${NC} Docker Status:"
-if docker ps >/dev/null 2>&1; then
-    echo -e "${GREEN}  ✓${NC} Docker is running"
-else
-    echo -e "${RED}  ✗${NC} Docker is not running"
-    exit 1
-fi
+log "Docker: $(docker --version)"
 
-# Check containers
 echo ""
-echo -e "${BLUE}[i]${NC} Container Status:"
+info "Container:"
 $DOCKER_COMPOSE ps
 
-# Check Ollama
 echo ""
-echo -e "${BLUE}[i]${NC} Ollama Service:"
-if docker exec agent-ollama ollama list >/dev/null 2>&1; then
-    echo -e "${GREEN}  ✓${NC} Ollama is accessible"
-    
-    # Check model
-    if docker exec agent-ollama ollama list 2>/dev/null | grep -q "HauhauCS"; then
-        echo -e "${GREEN}  ✓${NC} LLM model is loaded"
-    else
-        echo -e "${YELLOW}  !${NC} LLM model not found"
-        echo -e "${BLUE}    Run: ./pull-model.sh${NC}"
-    fi
+info "Ollama:"
+if docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1; then
+  log "Ollama aktif"
+  docker exec "$OLLAMA_CONTAINER" ollama list | sed 's/^/    /'
+  if docker exec "$OLLAMA_CONTAINER" ollama list | grep -q "dolphin-llama3"; then
+    log "Model $MODEL termuat"
+  else
+    warn "Model $MODEL belum ada -> ./pull-model.sh"
+  fi
 else
-    echo -e "${RED}  ✗${NC} Ollama is not accessible"
+  error "Ollama tidak bisa diakses"
 fi
 
-# Check Backend
 echo ""
-echo -e "${BLUE}[i]${NC} Backend Service:"
-if curl -s http://localhost:8000/health >/dev/null 2>&1; then
-    HEALTH=$(curl -s http://localhost:8000/health)
-    echo -e "${GREEN}  ✓${NC} Backend is accessible"
-    echo -e "${BLUE}    Health: $HEALTH${NC}"
+info "Backend:"
+if HEALTH="$(curl -fsS http://localhost:8000/health 2>/dev/null)"; then
+  log "Backend aktif"
+  if has jq; then echo "$HEALTH" | jq . | sed 's/^/    /'; else echo "    $HEALTH"; fi
 else
-    echo -e "${RED}  ✗${NC} Backend is not accessible"
+  error "Backend tidak bisa diakses"
 fi
 
-# Check Frontend
 echo ""
-echo -e "${BLUE}[i]${NC} Frontend Service:"
-if curl -s http://localhost:3000 >/dev/null 2>&1; then
-    echo -e "${GREEN}  ✓${NC} Frontend is accessible"
-    echo -e "${BLUE}    URL: http://localhost:3000${NC}"
+info "Frontend:"
+if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+  log "Frontend aktif: http://localhost:3000"
 else
-    echo -e "${RED}  ✗${NC} Frontend is not accessible"
+  error "Frontend tidak bisa diakses"
 fi
 
-# Resource usage
 echo ""
-echo -e "${BLUE}[i]${NC} Resource Usage:"
-docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" | grep -E "NAME|agent"
+info "Sandbox aktif:"
+docker ps --filter 'label=app=autonomous-agent' --format '    {{.Names}}\t{{.Status}}' || true
 
 echo ""
-echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+info "Resource:"
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" | grep -E "NAME|agent" || true
 echo ""

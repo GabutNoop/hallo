@@ -1,14 +1,26 @@
 """
 Autonomous AI Agent - Self-Correcting ReAct Loop
-Mengimplementasikan pola Reason-Act-Observe dengan self-correction
+
+Mendukung dua mode pemanggilan tool:
+1. Native OpenAI tool calling (kalau model/server mendukung)
+2. Protokol JSON (fallback) -> dipakai oleh dolphin-llama3:8b yang
+   memakai template ChatML tanpa dukungan `tools`.
+
+Event yang di-stream ke frontend (lewat WebSocket):
+  {"type": "status",         "state": ..., "message": ...}
+  {"type": "thought",        "step": n, "content": ...}
+  {"type": "tool_execution", "step": n, "tool": ..., "input": ..., "output": ...}
+  {"type": "final_answer",   "answer": ..., "total_steps": n, "retries": n}
+  {"type": "error",          "message": ...}
 """
 
+import asyncio
 import json
 import logging
-from typing import AsyncIterator, Dict, Any, Optional, List
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-import asyncio
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from llm_client import LLMClient
 from sandbox_manager import SandboxManager
@@ -17,17 +29,16 @@ from search_tool import SearchTool
 logger = logging.getLogger(__name__)
 
 
-class ActionType(Enum):
-    """Jenis action yang bisa dilakukan agent"""
+class ActionType(str, Enum):
     GOOGLE_SEARCH = "google_search"
     EXECUTE_IN_SANDBOX = "execute_in_sandbox"
     WRITE_FILE_IN_SANDBOX = "write_file_in_sandbox"
     READ_FILE_IN_SANDBOX = "read_file_in_sandbox"
+    LIST_FILES_IN_SANDBOX = "list_files_in_sandbox"
     FINAL_ANSWER = "final_answer"
 
 
-class AgentState(Enum):
-    """State agent saat ini"""
+class AgentState(str, Enum):
     IDLE = "idle"
     REASONING = "reasoning"
     SEARCHING = "searching"
@@ -40,7 +51,6 @@ class AgentState(Enum):
 
 @dataclass
 class ToolResult:
-    """Hasil eksekusi tool"""
     success: bool
     output: str
     error: Optional[str] = None
@@ -49,9 +59,8 @@ class ToolResult:
 
 @dataclass
 class AgentStep:
-    """Representasi satu langkah dalam agentic loop"""
     step_number: int
-    action_type: ActionType
+    action_type: str
     thought: str
     tool_input: Dict[str, Any]
     tool_output: Optional[ToolResult] = None
@@ -61,382 +70,598 @@ class AgentStep:
 
 @dataclass
 class AgentSession:
-    """Session agent yang sedang berjalan"""
     session_id: str
     task: str
     state: AgentState = AgentState.IDLE
     steps: List[AgentStep] = field(default_factory=list)
+    history: List[Dict[str, Any]] = field(default_factory=list)
     final_answer: Optional[str] = None
     error: Optional[str] = None
+    cancelled: bool = False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Definisi tool (dipakai untuk native tool calling)
+# ──────────────────────────────────────────────────────────────────────
+TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "google_search",
+            "description": "Cari informasi terbaru di web (DuckDuckGo). Gunakan untuk panduan instalasi, dokumentasi API, atau solusi error.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Kata kunci pencarian"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_in_sandbox",
+            "description": "Jalankan perintah shell (bash) di sandbox Docker Ubuntu dengan akses root.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "Perintah shell"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file_in_sandbox",
+            "description": "Tulis/timpa file di sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path absolut file"},
+                    "content": {"type": "string", "description": "Isi file"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_in_sandbox",
+            "description": "Baca isi file dari sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path absolut file"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files_in_sandbox",
+            "description": "Daftar isi direktori di sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path direktori"}},
+                "required": ["path"],
+            },
+        },
+    },
+]
+
+VALID_TOOLS = {t["function"]["name"] for t in TOOL_SCHEMAS}
+
+MAX_OBSERVATION_CHARS = 6000
 
 
 class AgentLoop:
-    """
-    Self-Correcting Agentic Loop dengan kemampuan:
-    - Reasoning sebelum action
-    - Web search untuk informasi terkini
-    - Sandbox execution dengan error handling
-    - Self-correction hingga 5x retry
-    """
-    
+    """Self-correcting agentic loop."""
+
     def __init__(
         self,
         llm_client: LLMClient,
         sandbox_manager: SandboxManager,
         search_tool: SearchTool,
-        max_retries: int = 5
+        max_retries: int = 5,
+        max_steps: int = 25,
     ):
         self.llm = llm_client
         self.sandbox = sandbox_manager
         self.search = search_tool
         self.max_retries = max_retries
+        self.max_steps = max_steps
+        self.tools = TOOL_SCHEMAS
         self.sessions: Dict[str, AgentSession] = {}
-        
-        # Define available tools untuk function calling
-        self.tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "google_search",
-                    "description": "Search the web for information using DuckDuckGo. Use this to find installation guides, API documentation, error solutions, or any current information needed to complete the task.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query to find relevant information"
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_in_sandbox",
-                    "description": "Execute a shell command in the isolated Docker sandbox with root access. Use this to install packages, run scripts, compile code, or test functionality.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "Shell command to execute (will run as root)"
-                            }
-                        },
-                        "required": ["command"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_file_in_sandbox",
-                    "description": "Create or write content to a file in the sandbox. Use this to create configuration files, source code, or any files needed for the task.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Absolute path where to write the file"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to write to the file"
-                            }
-                        },
-                        "required": ["path", "content"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_file_in_sandbox",
-                    "description": "Read the content of a file from the sandbox. Use this to inspect files, check configurations, or debug issues.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Absolute path of the file to read"
-                            }
-                        },
-                        "required": ["path"]
-                    }
-                }
-            }
-        ]
-    
-    async def execute_task(
-        self,
-        session_id: str,
-        task: str
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Execute a task with self-correcting agentic loop.
-        Yields progress updates and final answer.
-        """
-        # Initialize session
-        session = AgentSession(session_id=session_id, task=task)
-        self.sessions[session_id] = session
-        
+
+    # ──────────────────────────────────────────────────────────────
+    # Main loop
+    # ──────────────────────────────────────────────────────────────
+    async def execute_task(self, session_id: str, task: str) -> AsyncIterator[Dict[str, Any]]:
+        session = self.sessions.get(session_id)
+        if session is None or session.final_answer or session.state in (
+            AgentState.COMPLETED,
+            AgentState.FAILED,
+        ):
+            session = AgentSession(session_id=session_id, task=task)
+            self.sessions[session_id] = session
+        else:
+            session.task = task
+            session.error = None
+
+        session.cancelled = False
+        session.state = AgentState.REASONING
+        session.final_answer = None
+
+        history = session.history
+        if not history:
+            history.append({"role": "system", "content": self._system_prompt()})
+        history.append({"role": "user", "content": f"TUGAS: {task}"})
+
+        retries = 0
+
         try:
-            # Step 1: Initial reasoning
-            yield {
-                "type": "status",
-                "state": "reasoning",
-                "message": "🧠 Analyzing task and planning approach..."
-            }
-            
-            session.state = AgentState.REASONING
-            current_retry = 0
-            conversation_history = []
-            
-            # Add initial system prompt
-            system_prompt = self._build_system_prompt(task)
-            conversation_history.append({"role": "system", "content": system_prompt})
-            
-            # Main agentic loop
-            while current_retry <= self.max_retries:
+            yield self._status("reasoning", "🧠 Menganalisis tugas dan menyusun rencana...")
+
+            for _ in range(self.max_steps):
+                if session.cancelled:
+                    session.state = AgentState.IDLE
+                    yield self._status("cancelled", "🛑 Task dibatalkan.")
+                    return
+
                 step_number = len(session.steps) + 1
-                
-                # Get LLM decision
-                yield {
-                    "type": "status",
-                    "state": "reasoning",
-                    "message": f"🧠 Step {step_number}: AI is thinking..."
-                }
-                
-                response = await self.llm.chat_completion(
-                    messages=conversation_history,
-                    tools=self.tools,
-                    temperature=0.3 if current_retry > 0 else 0.7
-                )
-                
-                # Check if LLM wants to use a tool
-                if response.tool_calls:
-                    for tool_call in response.tool_calls:
-                        # Execute the tool
-                        tool_result = await self._execute_tool(
-                            tool_call.function.name,
-                            json.loads(tool_call.function.arguments),
-                            session_id=session_id
+                yield self._status("reasoning", f"🧠 Langkah {step_number}: AI sedang berpikir...")
+
+                try:
+                    response = await self.llm.chat_completion(
+                        messages=history,
+                        tools=self.tools if self.llm.supports_tools is not False else None,
+                        temperature=0.2 if retries > 0 else 0.5,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    session.state = AgentState.FAILED
+                    session.error = str(exc)
+                    yield {"type": "error", "message": f"❌ Gagal menghubungi LLM: {exc}"}
+                    return
+
+                actions, thought, final_answer = self._parse_response(response)
+
+                if thought:
+                    yield {"type": "thought", "step": step_number, "content": thought}
+
+                # ── Tidak ada tool call -> jawaban akhir ────────────
+                if not actions:
+                    answer = final_answer or thought or (response.content or "").strip()
+                    if not answer:
+                        answer = "Tidak ada jawaban yang dihasilkan model."
+                    history.append({"role": "assistant", "content": answer})
+                    session.state = AgentState.COMPLETED
+                    session.final_answer = answer
+                    yield {
+                        "type": "final_answer",
+                        "answer": answer,
+                        "total_steps": len(session.steps),
+                        "retries": retries,
+                    }
+                    return
+
+                # ── Eksekusi tiap action ───────────────────────────
+                for action in actions:
+                    if session.cancelled:
+                        session.state = AgentState.IDLE
+                        yield self._status("cancelled", "🛑 Task dibatalkan.")
+                        return
+
+                    name = action["name"]
+                    args = action["arguments"]
+                    call_id = action.get("id") or f"call_{step_number}"
+
+                    if name == ActionType.FINAL_ANSWER.value:
+                        answer = str(args.get("answer") or thought or "Selesai.")
+                        session.state = AgentState.COMPLETED
+                        session.final_answer = answer
+                        history.append({"role": "assistant", "content": answer})
+                        yield {
+                            "type": "final_answer",
+                            "answer": answer,
+                            "total_steps": len(session.steps),
+                            "retries": retries,
+                        }
+                        return
+
+                    if name not in VALID_TOOLS:
+                        observation = (
+                            f"ERROR: tool '{name}' tidak dikenal. "
+                            f"Tool yang tersedia: {', '.join(sorted(VALID_TOOLS))}."
                         )
-                        
-                        # Create step record
-                        step = AgentStep(
-                            step_number=step_number,
-                            action_type=ActionType(tool_call.function.name),
-                            thought=response.content or "",
-                            tool_input=json.loads(tool_call.function.arguments),
-                            tool_output=tool_result,
-                            is_retry=current_retry > 0,
-                            retry_count=current_retry
-                        )
-                        session.steps.append(step)
-                        
-                        # Yield tool execution result
+                        history.append({"role": "user", "content": f"OBSERVATION:\n{observation}"})
                         yield {
                             "type": "tool_execution",
                             "step": step_number,
-                            "tool": tool_call.function.name,
-                            "input": step.tool_input,
-                            "output": tool_result.output if tool_result.success else tool_result.error,
-                            "success": tool_result.success,
-                            "exit_code": tool_result.exit_code,
-                            "is_retry": current_retry > 0,
-                            "retry_count": current_retry
+                            "tool": name,
+                            "input": args,
+                            "output": observation,
+                            "success": False,
+                            "is_retry": retries > 0,
+                            "retry_count": retries,
                         }
-                        
-                        # Add to conversation history
-                        conversation_history.append({
-                            "role": "assistant",
-                            "content": response.content,
-                            "tool_calls": [tool_call.model_dump()]
-                        })
-                        
-                        conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_result.output if tool_result.success else f"ERROR: {tool_result.error}"
-                        })
-                        
-                        # Check if execution failed and needs retry
-                        if not tool_result.success and tool_call.function.name == "execute_in_sandbox":
-                            if current_retry < self.max_retries:
-                                current_retry += 1
-                                yield {
-                                    "type": "status",
-                                    "state": "correcting",
-                                    "message": f"❌ Error detected. Self-correcting (attempt {current_retry}/{self.max_retries})..."
-                                }
-                                
-                                # Search for error solution
-                                error_msg = tool_result.error or "Unknown error"
-                                search_query = f"how to fix error: {error_msg[:200]}"
-                                
-                                yield {
-                                    "type": "status",
-                                    "state": "searching",
-                                    "message": f"🔍 Searching for solution: {search_query[:100]}..."
-                                }
-                                
-                                search_result = await self.search.search(search_query)
-                                
-                                yield {
-                                    "type": "tool_execution",
-                                    "step": step_number,
-                                    "tool": "google_search",
-                                    "input": {"query": search_query},
-                                    "output": search_result,
-                                    "success": True,
-                                    "is_retry": True,
-                                    "retry_count": current_retry
-                                }
-                                
-                                # Add search results to conversation
-                                conversation_history.append({
-                                    "role": "user",
-                                    "content": f"The previous command failed with this error:\n\n{error_msg}\n\nHere are some search results that might help fix it:\n\n{search_result}\n\nPlease analyze the error and try a different approach."
-                                })
-                            else:
-                                # Max retries reached
-                                session.state = AgentState.FAILED
-                                session.error = f"Failed after {self.max_retries} attempts"
-                                yield {
-                                    "type": "error",
-                                    "message": f"❌ Task failed after {self.max_retries} retry attempts",
-                                    "error": tool_result.error
-                                }
-                                return
-                        
-                        # Yield small delay for streaming effect
-                        await asyncio.sleep(0.1)
-                
-                else:
-                    # LLM provided final answer without tool calls
-                    session.state = AgentState.COMPLETED
-                    session.final_answer = response.content
-                    
+                        continue
+
+                    yield self._status(
+                        "searching" if name == "google_search" else "executing",
+                        f"{self._tool_emoji(name)} {self._describe(name, args)}",
+                    )
+
+                    result = await self._execute_tool(name, args, session_id)
+
+                    step = AgentStep(
+                        step_number=step_number,
+                        action_type=name,
+                        thought=thought,
+                        tool_input=args,
+                        tool_output=result,
+                        is_retry=retries > 0,
+                        retry_count=retries,
+                    )
+                    session.steps.append(step)
+
+                    output_text = result.output if result.success else (result.error or result.output)
                     yield {
-                        "type": "final_answer",
-                        "answer": response.content,
-                        "total_steps": len(session.steps),
-                        "retries": current_retry
+                        "type": "tool_execution",
+                        "step": step_number,
+                        "tool": name,
+                        "input": args,
+                        "output": output_text[:MAX_OBSERVATION_CHARS],
+                        "success": result.success,
+                        "exit_code": result.exit_code,
+                        "is_retry": retries > 0,
+                        "retry_count": retries,
                     }
-                    
-                    return
-            
-            # If we exit loop without returning, task failed
+
+                    # Catat ke history
+                    self._append_call(history, response, action, call_id)
+                    observation = self._format_observation(result)
+                    self._append_observation(history, observation, call_id)
+
+                    # ── Self-correction ────────────────────────────
+                    if not result.success and name in (
+                        "execute_in_sandbox",
+                        "write_file_in_sandbox",
+                        "read_file_in_sandbox",
+                        "list_files_in_sandbox",
+                    ):
+                        if retries >= self.max_retries:
+                            session.state = AgentState.FAILED
+                            session.error = f"Gagal setelah {self.max_retries} percobaan"
+                            yield {
+                                "type": "error",
+                                "message": f"❌ Task gagal setelah {self.max_retries} kali self-correction",
+                                "error": (result.error or result.output)[:2000],
+                            }
+                            return
+
+                        retries += 1
+                        session.state = AgentState.CORRECTING
+                        yield self._status(
+                            "correcting",
+                            f"🔧 Error terdeteksi. Self-correcting ({retries}/{self.max_retries})...",
+                        )
+
+                        err = (result.error or result.output or "unknown error").strip()
+                        query = f"how to fix: {err[:180]}"
+                        yield self._status("searching", f"🔍 Mencari solusi: {query[:100]}")
+
+                        search_result = await self.search.search(query)
+                        yield {
+                            "type": "tool_execution",
+                            "step": step_number,
+                            "tool": "google_search",
+                            "input": {"query": query},
+                            "output": search_result[:MAX_OBSERVATION_CHARS],
+                            "success": True,
+                            "is_retry": True,
+                            "retry_count": retries,
+                        }
+
+                        history.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Perintah sebelumnya GAGAL:\n{err[:1500]}\n\n"
+                                    f"Hasil pencarian solusi:\n{search_result[:2500]}\n\n"
+                                    "Analisis penyebabnya lalu coba pendekatan lain."
+                                ),
+                            }
+                        )
+
+                    await asyncio.sleep(0.05)
+
             session.state = AgentState.FAILED
-            session.error = "Max iterations reached"
+            session.error = "Batas langkah tercapai"
             yield {
                 "type": "error",
-                "message": "❌ Task could not be completed within the allowed iterations"
+                "message": f"❌ Task belum selesai dalam {self.max_steps} langkah.",
             }
-            
-        except Exception as e:
-            logger.exception(f"Agent loop error: {e}")
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Agent loop error: %s", exc)
             session.state = AgentState.FAILED
-            session.error = str(e)
-            yield {
-                "type": "error",
-                "message": f"❌ Agent error: {str(e)}"
-            }
-    
-    async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any], session_id: str = None) -> ToolResult:
-        """Execute a tool and return result"""
+            session.error = str(exc)
+            yield {"type": "error", "message": f"❌ Agent error: {exc}"}
+
+    # ──────────────────────────────────────────────────────────────
+    # Parsing response
+    # ──────────────────────────────────────────────────────────────
+    def _parse_response(self, response) -> (List[Dict[str, Any]], str, Optional[str]):
+        """
+        Kembalikan (actions, thought, final_answer).
+        Mendukung native tool_calls maupun JSON di dalam content.
+        """
+        thought = (response.content or "").strip()
+
+        # 1) Native tool calls
+        if response.tool_calls:
+            actions = []
+            for call in response.tool_calls:
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {"_raw": call.function.arguments}
+                if not isinstance(args, dict):
+                    args = {"_raw": args}
+                actions.append({"name": call.function.name, "arguments": args, "id": call.id, "native": True})
+            return actions, thought, None
+
+        # 2) JSON protocol dalam content
+        payload = self._extract_json(thought)
+        if payload:
+            reasoning = str(payload.get("thought") or payload.get("reasoning") or "").strip()
+            if reasoning:
+                thought = reasoning
+
+            if payload.get("final_answer"):
+                return [], thought, str(payload["final_answer"])
+
+            action_name = payload.get("action") or payload.get("tool") or payload.get("name")
+            if action_name:
+                args = (
+                    payload.get("action_input")
+                    or payload.get("arguments")
+                    or payload.get("input")
+                    or payload.get("parameters")
+                    or {}
+                )
+                if isinstance(args, str):
+                    if action_name == "execute_in_sandbox":
+                        args = {"command": args}
+                    elif action_name == "google_search":
+                        args = {"query": args}
+                    else:
+                        args = {"path": args}
+                if action_name == ActionType.FINAL_ANSWER.value:
+                    return [], thought, str(args.get("answer") or thought)
+                if isinstance(args, dict):
+                    return [{"name": action_name, "arguments": args, "native": False}], thought, None
+
+        return [], thought, None
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+        """Ambil objek JSON pertama dari teks (menerima blok ```json)."""
+        if not text:
+            return None
+
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        candidates = list(fenced)
+
+        # Objek JSON balanced pertama
+        start = text.find("{")
+        while start != -1:
+            depth, in_str, esc = 0, False, False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start : i + 1])
+                        break
+            break
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    # ──────────────────────────────────────────────────────────────
+    # History helpers
+    # ──────────────────────────────────────────────────────────────
+    def _append_call(self, history: List[Dict[str, Any]], response, action: Dict[str, Any], call_id: str):
+        if action.get("native"):
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": action["name"],
+                                "arguments": json.dumps(action["arguments"], ensure_ascii=False),
+                            },
+                        }
+                    ],
+                }
+            )
+        else:
+            history.append({"role": "assistant", "content": response.content or ""})
+
+    def _append_observation(self, history: List[Dict[str, Any]], observation: str, call_id: str):
+        last = history[-1] if history else {}
+        if last.get("tool_calls"):
+            history.append({"role": "tool", "tool_call_id": call_id, "content": observation})
+        else:
+            history.append({"role": "user", "content": f"OBSERVATION:\n{observation}"})
+
+    @staticmethod
+    def _format_observation(result: ToolResult) -> str:
+        if result.success:
+            text = result.output or "(tidak ada output)"
+        else:
+            text = f"ERROR (exit_code={result.exit_code}): {result.error or result.output}"
+        return text[:MAX_OBSERVATION_CHARS]
+
+    # ──────────────────────────────────────────────────────────────
+    # Tools
+    # ──────────────────────────────────────────────────────────────
+    async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any], session_id: str) -> ToolResult:
         try:
             if tool_name == "google_search":
-                result = await self.search.search(tool_input["query"])
-                return ToolResult(success=True, output=result)
-            
-            elif tool_name == "execute_in_sandbox":
-                result = await self.sandbox.execute_command(
-                    tool_input["command"],
-                    session_id=session_id
-                )
+                query = str(tool_input.get("query", "")).strip()
+                if not query:
+                    return ToolResult(False, "", "Parameter 'query' kosong")
+                return ToolResult(True, await self.search.search(query))
+
+            if tool_name == "execute_in_sandbox":
+                command = str(tool_input.get("command", "")).strip()
+                if not command:
+                    return ToolResult(False, "", "Parameter 'command' kosong")
+                res = await self.sandbox.execute_command(command, session_id=session_id)
                 return ToolResult(
-                    success=result["exit_code"] == 0,
-                    output=result["stdout"],
-                    error=result["stderr"],
-                    exit_code=result["exit_code"]
+                    success=res["exit_code"] == 0,
+                    output=res["stdout"],
+                    error=res["stderr"] or (res["stdout"] if res["exit_code"] != 0 else None),
+                    exit_code=res["exit_code"],
                 )
-            
-            elif tool_name == "write_file_in_sandbox":
-                result = await self.sandbox.write_file(
-                    tool_input["path"],
-                    tool_input["content"],
-                    session_id=session_id
-                )
+
+            if tool_name == "write_file_in_sandbox":
+                path = str(tool_input.get("path", "")).strip()
+                content = tool_input.get("content", "")
+                if not path:
+                    return ToolResult(False, "", "Parameter 'path' kosong")
+                res = await self.sandbox.write_file(path, str(content), session_id=session_id)
+                ok = res["exit_code"] == 0
                 return ToolResult(
-                    success=result["exit_code"] == 0,
-                    output="File written successfully",
-                    error=result["stderr"] if result["exit_code"] != 0 else None,
-                    exit_code=result["exit_code"]
+                    success=ok,
+                    output=f"File tersimpan: {path}" if ok else res["stdout"],
+                    error=None if ok else (res["stderr"] or res["stdout"]),
+                    exit_code=res["exit_code"],
                 )
-            
-            elif tool_name == "read_file_in_sandbox":
-                result = await self.sandbox.read_file(
-                    tool_input["path"],
-                    session_id=session_id
-                )
+
+            if tool_name == "read_file_in_sandbox":
+                path = str(tool_input.get("path", "")).strip()
+                res = await self.sandbox.read_file(path, session_id=session_id)
+                ok = res["exit_code"] == 0
                 return ToolResult(
-                    success=result["exit_code"] == 0,
-                    output=result["stdout"],
-                    error=result["stderr"] if result["exit_code"] != 0 else None,
-                    exit_code=result["exit_code"]
+                    success=ok,
+                    output=res["stdout"],
+                    error=None if ok else (res["stderr"] or res["stdout"]),
+                    exit_code=res["exit_code"],
                 )
-            
-            else:
+
+            if tool_name == "list_files_in_sandbox":
+                path = str(tool_input.get("path", "/workspace")).strip() or "/workspace"
+                res = await self.sandbox.list_files(path, session_id=session_id)
+                ok = res["exit_code"] == 0
                 return ToolResult(
-                    success=False,
-                    output="",
-                    error=f"Unknown tool: {tool_name}"
+                    success=ok,
+                    output=res["stdout"],
+                    error=None if ok else (res["stderr"] or res["stdout"]),
+                    exit_code=res["exit_code"],
                 )
-        
-        except Exception as e:
-            logger.exception(f"Tool execution error: {e}")
-            return ToolResult(
-                success=False,
-                output="",
-                error=f"Tool execution failed: {str(e)}"
-            )
-    
-    def _build_system_prompt(self, task: str) -> str:
-        """Build system prompt for LLM"""
-        return f"""You are an autonomous AI agent operating in a Linux Docker sandbox with root access. Your goal is to complete tasks by:
 
-1. **Reasoning** about what needs to be done
-2. **Searching** the web when you need current information (installation guides, API docs, error solutions)
-3. **Executing** commands in the sandbox
-4. **Self-correcting** when errors occur by searching for solutions and retrying
+            return ToolResult(False, "", f"Tool tidak dikenal: {tool_name}")
 
-TASK: {task}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Tool execution error: %s", exc)
+            return ToolResult(False, "", f"Tool gagal dijalankan: {exc}")
 
-INSTRUCTIONS:
-- Always search for information BEFORE executing complex commands (e.g., how to install packages, configure services)
-- If a command fails, analyze the error and search for solutions before retrying
-- Use write_file_in_sandbox to create necessary files (scripts, configs, etc.)
-- Use read_file_in_sandbox to inspect files when debugging
-- Be methodical: plan → search → execute → verify
-- Provide clear explanations of what you're doing
+    # ──────────────────────────────────────────────────────────────
+    # Prompt & util
+    # ──────────────────────────────────────────────────────────────
+    def _system_prompt(self) -> str:
+        return """You are Dolphin, an autonomous AI agent running on a Linux (Ubuntu) Docker sandbox with full root access.
 
-AVAILABLE TOOLS:
-- google_search(query): Search the web for information
-- execute_in_sandbox(command): Run shell commands (you have root access)
-- write_file_in_sandbox(path, content): Create/edit files
-- read_file_in_sandbox(path): Read file contents
+You solve tasks by: reason -> act (call a tool) -> observe the result -> repeat, until the task is done.
 
-When you've completed the task or determined it cannot be done, provide your final answer without calling any tools.
+AVAILABLE TOOLS
+- google_search(query)                 : cari informasi di web
+- execute_in_sandbox(command)          : jalankan perintah bash sebagai root di Ubuntu sandbox
+- write_file_in_sandbox(path, content) : buat/timpa file
+- read_file_in_sandbox(path)           : baca file
+- list_files_in_sandbox(path)          : lihat isi direktori
+
+OUTPUT FORMAT (WAJIB)
+Balas HANYA dengan satu objek JSON, tanpa teks lain di luar JSON.
+
+Untuk memanggil tool:
+{"thought": "alasan singkat", "action": "execute_in_sandbox", "action_input": {"command": "ls -la /workspace"}}
+
+Kalau tugas sudah selesai:
+{"thought": "ringkasan", "final_answer": "jawaban lengkap untuk user"}
+
+ATURAN
+- Satu tool per balasan. Tunggu OBSERVATION sebelum langkah berikutnya.
+- Perintah non-interaktif: pakai `-y`, set DEBIAN_FRONTEND=noninteractive, hindari perintah yang menunggu input.
+- Jangan jalankan proses foreground yang tidak berhenti; pakai `&` + log, atau `timeout`.
+- Kalau perintah gagal, baca error-nya, cari solusi via google_search, lalu coba pendekatan lain.
+- Direktori kerja default: /workspace.
+- Jawaban akhir ditulis dalam bahasa yang sama dengan permintaan user.
 """
-    
+
+    @staticmethod
+    def _status(state: str, message: str) -> Dict[str, Any]:
+        return {"type": "status", "state": state, "message": message}
+
+    @staticmethod
+    def _tool_emoji(name: str) -> str:
+        return {
+            "google_search": "🔍",
+            "execute_in_sandbox": "💻",
+            "write_file_in_sandbox": "📝",
+            "read_file_in_sandbox": "📖",
+            "list_files_in_sandbox": "📂",
+        }.get(name, "⚙️")
+
+    @staticmethod
+    def _describe(name: str, args: Dict[str, Any]) -> str:
+        if name == "google_search":
+            return f'Mencari: "{args.get("query", "")}"'
+        if name == "execute_in_sandbox":
+            return f'$ {str(args.get("command", ""))[:160]}'
+        if name == "write_file_in_sandbox":
+            return f'Menulis file: {args.get("path", "")}'
+        if name == "read_file_in_sandbox":
+            return f'Membaca file: {args.get("path", "")}'
+        if name == "list_files_in_sandbox":
+            return f'Melihat direktori: {args.get("path", "/workspace")}'
+        return name
+
+    # ──────────────────────────────────────────────────────────────
     def get_session(self, session_id: str) -> Optional[AgentSession]:
-        """Get current session state"""
         return self.sessions.get(session_id)
-    
+
+    def cancel(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session:
+            session.cancelled = True
+            return True
+        return False
+
     def cleanup_session(self, session_id: str):
-        """Remove session from memory"""
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+        self.sessions.pop(session_id, None)

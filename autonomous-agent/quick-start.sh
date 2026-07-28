@@ -1,117 +1,74 @@
 #!/bin/bash
-
 # ──────────────────────────────────────────────────────────────────────
-# Quick Start Script - Launch Autonomous AI Agent
-# Gunakan setelah setup.sh selesai
+# Quick Start - jalankan semua service (setelah ./setup.sh)
 # ──────────────────────────────────────────────────────────────────────
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+cd "$SCRIPT_DIR"
 
-set -e
-
-# Colors
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_DIR"
-
-# Detect $DOCKER_COMPOSE command
-DOCKER_COMPOSE="docker compose"
-if ! docker compose version >/dev/null 2>&1; then
-    DOCKER_COMPOSE="$DOCKER_COMPOSE"
-fi
+require_docker
+load_env
+DOCKER_COMPOSE="$(detect_compose)"
+[ -z "$DOCKER_COMPOSE" ] && { error "docker compose tidak tersedia"; exit 1; }
 
 echo -e "${BLUE}${BOLD}"
-cat << "EOF"
+cat << "BANNER"
     ╔═══════════════════════════════════════════════════════════╗
-    ║                                                           ║
-    ║   🚀  STARTING AUTONOMOUS AI AGENT                       ║
-    ║                                                           ║
+    ║   🚀  MENJALANKAN AUTONOMOUS AI AGENT                     ║
     ╚═══════════════════════════════════════════════════════════╝
-EOF
+BANNER
 echo -e "${NC}"
 
-# Check if services are already running
-if $DOCKER_COMPOSE ps | grep -q "Up"; then
-    echo -e "${YELLOW}[!]${NC} Services are already running!"
-    echo -e "${BLUE}[i]${NC} Access at: http://localhost:3000"
-    echo ""
-    read -p "Restart services? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 0
-    fi
-    echo -e "${BLUE}[i]${NC} Stopping existing services..."
+if $DOCKER_COMPOSE ps --status running 2>/dev/null | grep -q agent-; then
+  warn "Service sudah berjalan."
+  read -r -p "Restart? (y/N): " reply
+  if [[ "$reply" =~ ^[Yy]$ ]]; then
     $DOCKER_COMPOSE down
+  else
+    info "Akses di http://localhost:3000"
+    exit 0
+  fi
 fi
 
-# Start services
-echo -e "${GREEN}[✓]${NC} Starting all services..."
 $DOCKER_COMPOSE up -d
 
-# Wait for services
-echo -e "${BLUE}[i]${NC} Waiting for services to be ready..."
-sleep 5
-
-# Check Ollama
-for i in {1..10}; do
-    if docker exec agent-ollama ollama list >/dev/null 2>&1; then
-        echo -e "${GREEN}[✓]${NC} Ollama is ready"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "${YELLOW}[!]${NC} Ollama may not be ready yet"
-    fi
-    sleep 2
+info "Menunggu Ollama..."
+for i in $(seq 1 30); do
+  docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1 && { log "Ollama siap"; break; }
+  [ "$i" -eq 30 ] && warn "Ollama belum siap"
+  sleep 2
 done
 
-# Check Backend
-for i in {1..10}; do
-    if curl -s http://localhost:8000/health >/dev/null 2>&1; then
-        echo -e "${GREEN}[✓]${NC} Backend is ready"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "${YELLOW}[!]${NC} Backend may not be ready yet"
-    fi
-    sleep 2
+info "Menunggu Backend..."
+for i in $(seq 1 45); do
+  curl -fsS http://localhost:8000/health >/dev/null 2>&1 && { log "Backend siap"; break; }
+  [ "$i" -eq 45 ] && warn "Backend belum siap (cek ./logs.sh backend)"
+  sleep 2
 done
 
-# Check Frontend
-for i in {1..10}; do
-    if curl -s http://localhost:3000 >/dev/null 2>&1; then
-        echo -e "${GREEN}[✓]${NC} Frontend is ready"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "${YELLOW}[!]${NC} Frontend may not be ready yet"
-    fi
-    sleep 2
+info "Menunggu Frontend..."
+for i in $(seq 1 45); do
+  curl -fsS http://localhost:3000 >/dev/null 2>&1 && { log "Frontend siap"; break; }
+  [ "$i" -eq 45 ] && warn "Frontend belum siap (cek ./logs.sh frontend)"
+  sleep 2
 done
+
+MODEL="$(model_name)"
+if ! docker exec "$OLLAMA_CONTAINER" ollama list 2>/dev/null | grep -q "dolphin-llama3"; then
+  warn "Model $MODEL belum ada. Jalankan: ./pull-model.sh"
+fi
 
 echo ""
 echo -e "${GREEN}${BOLD}"
-cat << "EOF"
+cat << "BANNER"
     ╔═══════════════════════════════════════════════════════════╗
-    ║                                                           ║
-    ║   ✅  ALL SERVICES STARTED!                               ║
-    ║                                                           ║
-    ║   🌐  Frontend:  http://localhost:3000                   ║
-    ║   🔧  Backend:   http://localhost:8000                   ║
-    ║   🤖  Ollama:    http://localhost:11434                  ║
-    ║                                                           ║
-    ║   📝  View logs:  ./logs.sh                              ║
-    ║   🛑  Stop:       ./stop.sh                              ║
-    ║   📊  Status:     ./status.sh                            ║
-    ║                                                           ║
+    ║   ✅  SEMUA SERVICE BERJALAN                              ║
+    ║   🌐  Frontend : http://localhost:3000                    ║
+    ║   🔧  Backend  : http://localhost:8000/health             ║
+    ║   🤖  Ollama   : http://localhost:11434                   ║
     ╚═══════════════════════════════════════════════════════════╝
-EOF
+BANNER
 echo -e "${NC}"
 
-# Open browser
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    open http://localhost:3000 2>/dev/null || true
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    xdg-open http://localhost:3000 2>/dev/null || true
-fi
+has xdg-open && xdg-open http://localhost:3000 >/dev/null 2>&1 || true

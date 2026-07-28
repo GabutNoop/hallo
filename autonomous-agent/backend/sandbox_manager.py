@@ -1,436 +1,404 @@
 """
 Sandbox Manager - Docker SDK Wrapper
-Manages isolated Docker containers for AI agent execution
+
+Mengelola container Docker terisolasi (Ubuntu) untuk eksekusi perintah agent.
+Perbaikan penting:
+- Docker client dibuat lazily + pesan error jelas kalau /var/run/docker.sock tidak ada
+- stdout & stderr dipisah (demux=True)
+- Nama container unik & bersihkan sisa container lama
+- write_file lewat tar archive (aman untuk konten apa pun, termasuk quote/heredoc)
+- Semua operasi blocking dijalankan di thread executor
 """
 
 import asyncio
+import io
 import logging
+import os
+import tarfile
+import time
 import uuid
-from typing import Dict, Optional, Any, Tuple
+from typing import Any, Dict, Optional
+
 import docker
-from docker.errors import ContainerError, ImageNotFound, APIError
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
 
 
+class SandboxError(RuntimeError):
+    """Error khusus sandbox."""
+
+
 class SandboxManager:
-    """
-    Manages Docker sandbox containers for AI agent execution.
-    Each session gets an isolated container with root access.
-    """
-    
-    # Default sandbox configuration
     DEFAULT_IMAGE = "ubuntu:22.04"
     DEFAULT_MEMORY_LIMIT = "2g"
-    DEFAULT_CPU_LIMIT = 2.0  # CPU cores
-    DEFAULT_TIMEOUT = 60  # seconds per command
-    DEFAULT_DISK_LIMIT = "10g"
-    
+    DEFAULT_CPU_LIMIT = 2.0
+    DEFAULT_TIMEOUT = 60
+    NAME_PREFIX = "agent-sandbox-"
+
     def __init__(
         self,
-        image: str = None,
-        memory_limit: str = None,
-        cpu_limit: float = None,
-        command_timeout: int = None,
-        network_enabled: bool = True
+        image: Optional[str] = None,
+        memory_limit: Optional[str] = None,
+        cpu_limit: Optional[float] = None,
+        command_timeout: Optional[int] = None,
+        network_enabled: bool = True,
+        auto_provision: bool = True,
     ):
-        """
-        Initialize Sandbox Manager.
-        
-        Args:
-            image: Docker image to use for sandbox
-            memory_limit: Memory limit for container (e.g., "2g")
-            cpu_limit: CPU limit (number of cores)
-            command_timeout: Timeout for individual commands in seconds
-            network_enabled: Whether container has network access
-        """
         self.image = image or self.DEFAULT_IMAGE
         self.memory_limit = memory_limit or self.DEFAULT_MEMORY_LIMIT
         self.cpu_limit = cpu_limit or self.DEFAULT_CPU_LIMIT
         self.command_timeout = command_timeout or self.DEFAULT_TIMEOUT
         self.network_enabled = network_enabled
-        
-        # Docker client
-        self.client = docker.from_env()
-        
-        # Active containers: session_id -> Container
+        self.auto_provision = auto_provision
+
+        self._client: Optional[docker.DockerClient] = None
         self.containers: Dict[str, Container] = {}
-        
-        logger.info(f"SandboxManager initialized with image={self.image}")
-    
-    async def create_sandbox(self, session_id: str = None) -> str:
-        """
-        Create a new isolated sandbox container.
-        
-        Args:
-            session_id: Optional session identifier. Generated if not provided.
-            
-        Returns:
-            session_id of the created sandbox
-        """
-        if session_id is None:
-            session_id = str(uuid.uuid4())
-        
-        try:
-            # Pull image if not available locally
+        self._locks: Dict[str, asyncio.Lock] = {}
+
+        logger.info("SandboxManager init: image=%s", self.image)
+
+    # ──────────────────────────────────────────────────────────────
+    # Docker client
+    # ──────────────────────────────────────────────────────────────
+    @property
+    def client(self) -> docker.DockerClient:
+        if self._client is None:
             try:
-                self.client.images.get(self.image)
-            except ImageNotFound:
-                logger.info(f"Pulling image {self.image}...")
-                self.client.images.pull(self.image)
-                logger.info(f"Image {self.image} pulled successfully")
-            
-            # Container configuration
-            container_config = {
+                self._client = docker.from_env()
+                self._client.ping()
+            except DockerException as exc:
+                raise SandboxError(
+                    "Tidak bisa terhubung ke Docker daemon. Pastikan Docker berjalan dan "
+                    "socket ter-mount: -v /var/run/docker.sock:/var/run/docker.sock. "
+                    f"Detail: {exc}"
+                ) from exc
+        return self._client
+
+    def docker_available(self) -> bool:
+        try:
+            self.client.ping()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _run(self, func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+    # ──────────────────────────────────────────────────────────────
+    # Lifecycle
+    # ──────────────────────────────────────────────────────────────
+    async def create_sandbox(self, session_id: Optional[str] = None) -> str:
+        session_id = session_id or str(uuid.uuid4())
+
+        if session_id in self.containers:
+            try:
+                container = self.containers[session_id]
+                await self._run(container.reload)
+                if container.status == "running":
+                    return session_id
+            except Exception:  # noqa: BLE001
+                self.containers.pop(session_id, None)
+
+        name = f"{self.NAME_PREFIX}{session_id[:20]}-{int(time.time())}"
+
+        try:
+            await self._ensure_image()
+
+            config: Dict[str, Any] = {
                 "image": self.image,
-                "name": f"agent-sandbox-{session_id}",
+                "name": name,
+                "command": ["sleep", "infinity"],
                 "detach": True,
                 "user": "root",
                 "working_dir": "/workspace",
                 "mem_limit": self.memory_limit,
                 "nano_cpus": int(self.cpu_limit * 1e9),
                 "stdin_open": True,
-                "tty": True,
+                "tty": False,
+                "labels": {"app": "autonomous-agent", "session": session_id},
                 "environment": {
                     "DEBIAN_FRONTEND": "noninteractive",
-                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    "LANG": "C.UTF-8",
+                    "PYTHONUNBUFFERED": "1",
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 },
-                # Auto-remove on stop
                 "auto_remove": False,
             }
-            
-            # Network configuration
             if not self.network_enabled:
-                container_config["network_disabled"] = True
-            
-            # Create and start container
-            container = self.client.containers.create(**container_config)
-            container.start()
-            
-            # Store reference
+                config["network_disabled"] = True
+
+            await self._remove_stale(name)
+
+            container = await self._run(self.client.containers.create, **config)
+            await self._run(container.start)
             self.containers[session_id] = container
-            
-            logger.info(f"Sandbox created: session_id={session_id}, container_id={container.id[:12]}")
-            
-            # Initialize workspace directory
-            await self.execute_command("mkdir -p /workspace", session_id)
-            
-            # Install basic utilities
-            init_cmd = (
-                "apt-get update -qq && "
-                "apt-get install -y -qq "
-                "curl wget git python3 python3-pip "
-                "nodejs npm build-essential "
-                "jq netcat-openbsd "
-                "> /dev/null 2>&1 || true"
-            )
-            await self.execute_command(init_cmd, session_id, timeout=120)
-            
-            logger.info(f"Sandbox initialized: session_id={session_id}")
-            
+            self._locks[session_id] = asyncio.Lock()
+
+            logger.info("Sandbox dibuat: session=%s container=%s", session_id, container.id[:12])
+
+            await self.execute_command("mkdir -p /workspace", session_id, timeout=30)
+
+            if self.auto_provision:
+                asyncio.create_task(self._provision(session_id))
+
             return session_id
-            
-        except (ContainerError, ImageNotFound, APIError) as e:
-            logger.error(f"Failed to create sandbox: {e}")
-            # Cleanup on failure
-            if session_id in self.containers:
-                self.destroy_sandbox(session_id)
-            raise RuntimeError(f"Sandbox creation failed: {str(e)}")
-    
+
+        except SandboxError:
+            raise
+        except (ImageNotFound, APIError, DockerException) as exc:
+            logger.error("Gagal membuat sandbox: %s", exc)
+            await self.destroy_sandbox(session_id)
+            raise SandboxError(f"Pembuatan sandbox gagal: {exc}") from exc
+
+    async def _ensure_image(self):
+        try:
+            await self._run(self.client.images.get, self.image)
+        except ImageNotFound:
+            logger.info("Pulling image %s ...", self.image)
+            await self._run(self.client.images.pull, self.image)
+            logger.info("Image %s siap", self.image)
+
+    async def _remove_stale(self, name: str):
+        try:
+            old = await self._run(self.client.containers.get, name)
+            await self._run(old.remove, force=True)
+        except NotFound:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Stale container check: %s", exc)
+
+    async def _provision(self, session_id: str):
+        """Install tooling dasar di background supaya session cepat siap."""
+        cmd = (
+            "export DEBIAN_FRONTEND=noninteractive && "
+            "apt-get update -qq && "
+            "apt-get install -y -qq --no-install-recommends "
+            "ca-certificates curl wget git python3 python3-pip python3-venv "
+            "build-essential jq unzip nano procps iproute2 netcat-openbsd"
+        )
+        try:
+            res = await self.execute_command(cmd, session_id, timeout=600)
+            if res["exit_code"] == 0:
+                logger.info("Sandbox %s ter-provision", session_id)
+            else:
+                logger.warning("Provisioning sandbox %s gagal sebagian", session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Provisioning error: %s", exc)
+
+    # ──────────────────────────────────────────────────────────────
+    # Eksekusi
+    # ──────────────────────────────────────────────────────────────
     async def execute_command(
         self,
         command: str,
-        session_id: str = None,
-        timeout: int = None,
-        workdir: str = None
+        session_id: Optional[str] = None,
+        timeout: Optional[int] = None,
+        workdir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Execute a shell command in the sandbox container.
-        
-        Args:
-            command: Shell command to execute
-            session_id: Target sandbox session
-            timeout: Command timeout in seconds
-            workdir: Working directory for the command
-            
-        Returns:
-            Dict with stdout, stderr, exit_code
-        """
         timeout = timeout or self.command_timeout
-        
-        # If no session_id, use the first (or only) container
-        if session_id is None:
-            if not self.containers:
-                raise RuntimeError("No active sandbox session")
-            session_id = list(self.containers.keys())[0]
-        
-        container = self._get_container(session_id)
-        
-        # Build the full command
-        full_command = command
-        if workdir:
-            full_command = f"cd {workdir} && {command}"
-        
+
         try:
-            # Execute command with timeout
-            loop = asyncio.get_event_loop()
-            
-            exec_result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: container.exec_run(
-                        cmd=["bash", "-c", full_command],
-                        user="root",
-                        workdir=workdir,
-                        environment={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-                    )
-                ),
-                timeout=timeout
+            session_id = self._resolve_session(session_id)
+            container = await self._get_container(session_id)
+        except SandboxError as exc:
+            return self._result("", str(exc), -1, command)
+
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+
+        def _exec():
+            return container.exec_run(
+                cmd=["bash", "-lc", command],
+                user="root",
+                workdir=workdir or "/workspace",
+                demux=True,
+                environment={
+                    "DEBIAN_FRONTEND": "noninteractive",
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                },
             )
-            
-            exit_code = exec_result.exit_code
-            output = exec_result.output.decode("utf-8", errors="replace").strip()
-            
-            # Parse output - split stdout and stderr isn't straightforward with exec_run
-            # We'll treat it all as stdout since bash -c redirects
-            return {
-                "stdout": output,
-                "stderr": "",
-                "exit_code": exit_code,
-                "command": command
-            }
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"Command timed out after {timeout}s: {command[:100]}")
-            return {
-                "stdout": "",
-                "stderr": f"Command timed out after {timeout} seconds",
-                "exit_code": -1,
-                "command": command
-            }
-        except Exception as e:
-            logger.error(f"Command execution error: {e}")
-            return {
-                "stdout": "",
-                "stderr": f"Execution error: {str(e)}",
-                "exit_code": -1,
-                "command": command
-            }
-    
-    async def write_file(
-        self,
-        path: str,
-        content: str,
-        session_id: str = None
-    ) -> Dict[str, Any]:
-        """
-        Write content to a file in the sandbox.
-        
-        Args:
-            path: Absolute path in the container
-            content: File content to write
-            session_id: Target sandbox session
-            
-        Returns:
-            Execution result dict
-        """
-        # Use heredoc approach for writing files safely
-        # Escape content for shell safety
-        escaped_content = content.replace("'", "'\\''")
-        command = f"cat > {path} << 'AGENT_EOF_MARKER'\n{content}\nAGENT_EOF_MARKER"
-        
-        return await self.execute_command(command, session_id)
-    
-    async def read_file(
-        self,
-        path: str,
-        session_id: str = None
-    ) -> Dict[str, Any]:
-        """
-        Read a file from the sandbox.
-        
-        Args:
-            path: Absolute path in the container
-            session_id: Target sandbox session
-            
-        Returns:
-            Execution result dict with file content in stdout
-        """
-        return await self.execute_command(f"cat {path}", session_id)
-    
-    async def list_files(
-        self,
-        path: str = "/workspace",
-        session_id: str = None
-    ) -> Dict[str, Any]:
-        """
-        List files in a directory within the sandbox.
-        
-        Args:
-            path: Directory path to list
-            session_id: Target sandbox session
-            
-        Returns:
-            Execution result dict
-        """
-        return await self.execute_command(f"ls -la {path}", session_id)
-    
+
+        async with lock:
+            try:
+                exec_result = await asyncio.wait_for(self._run(_exec), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Command timeout %ss: %s", timeout, command[:120])
+                return self._result(
+                    "", f"Perintah timeout setelah {timeout} detik. Jalankan di background atau naikkan COMMAND_TIMEOUT.", 124, command
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Command error: %s", exc)
+                return self._result("", f"Execution error: {exc}", -1, command)
+
+        stdout_b, stderr_b = (exec_result.output or (None, None))
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace").strip()
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+
+        return self._result(stdout, stderr, exec_result.exit_code, command)
+
+    @staticmethod
+    def _result(stdout: str, stderr: str, exit_code: int, command: str) -> Dict[str, Any]:
+        return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code, "command": command}
+
+    # ──────────────────────────────────────────────────────────────
+    # File operations
+    # ──────────────────────────────────────────────────────────────
+    async def write_file(self, path: str, content: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Tulis file lewat tar archive (aman untuk semua karakter)."""
+        try:
+            session_id = self._resolve_session(session_id)
+            container = await self._get_container(session_id)
+        except SandboxError as exc:
+            return self._result("", str(exc), -1, f"write_file {path}")
+
+        if not path.startswith("/"):
+            path = f"/workspace/{path}"
+
+        directory = os.path.dirname(path) or "/"
+        filename = os.path.basename(path)
+
+        mk = await self.execute_command(f"mkdir -p {self._quote(directory)}", session_id, timeout=30)
+        if mk["exit_code"] != 0:
+            return mk
+
+        data = content.encode("utf-8")
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as tar:
+            info = tarfile.TarInfo(name=filename)
+            info.size = len(data)
+            info.mode = 0o644
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(data))
+        stream.seek(0)
+
+        try:
+            ok = await self._run(container.put_archive, directory, stream.getvalue())
+            if not ok:
+                return self._result("", "put_archive gagal", 1, f"write_file {path}")
+            return self._result(f"File tersimpan: {path} ({len(data)} bytes)", "", 0, f"write_file {path}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("write_file error: %s", exc)
+            return self._result("", f"Gagal menulis file: {exc}", -1, f"write_file {path}")
+
+    async def read_file(self, path: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+        return await self.execute_command(f"cat {self._quote(path)}", session_id)
+
+    async def list_files(self, path: str = "/workspace", session_id: Optional[str] = None) -> Dict[str, Any]:
+        return await self.execute_command(f"ls -la {self._quote(path)}", session_id)
+
     async def install_package(
-        self,
-        package: str,
-        package_manager: str = "apt",
-        session_id: str = None
+        self, package: str, package_manager: str = "apt", session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Install a package in the sandbox.
-        
-        Args:
-            package: Package name to install
-            package_manager: Package manager to use (apt, pip, npm)
-            session_id: Target sandbox session
-            
-        Returns:
-            Execution result dict
-        """
-        if package_manager == "apt":
-            cmd = f"apt-get update -qq && apt-get install -y -qq {package}"
-        elif package_manager == "pip":
-            cmd = f"pip3 install {package}"
-        elif package_manager == "npm":
+        pm = package_manager.lower()
+        if pm == "apt":
+            cmd = f"DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq {package}"
+        elif pm == "pip":
+            cmd = f"pip3 install --break-system-packages {package} || pip3 install {package}"
+        elif pm == "npm":
             cmd = f"npm install -g {package}"
         else:
-            return {
-                "stdout": "",
-                "stderr": f"Unknown package manager: {package_manager}",
-                "exit_code": -1,
-                "command": ""
-            }
-        
-        return await self.execute_command(cmd, session_id, timeout=120)
-    
-    async def get_container_info(self, session_id: str = None) -> Dict[str, Any]:
-        """
-        Get information about the sandbox container.
-        
-        Args:
-            session_id: Target sandbox session
-            
-        Returns:
-            Container information dict
-        """
-        container = self._get_container(session_id)
-        
+            return self._result("", f"Package manager tidak dikenal: {package_manager}", -1, "")
+        return await self.execute_command(cmd, session_id, timeout=600)
+
+    @staticmethod
+    def _quote(value: str) -> str:
+        return "'" + str(value).replace("'", "'\\''") + "'"
+
+    # ──────────────────────────────────────────────────────────────
+    # Info & cleanup
+    # ──────────────────────────────────────────────────────────────
+    async def get_container_info(self, session_id: Optional[str] = None) -> Dict[str, Any]:
         try:
-            container_info = container.attrs
-            stats = container.stats(stream=False)
-            
+            session_id = self._resolve_session(session_id)
+            container = await self._get_container(session_id)
+            stats = await self._run(container.stats, stream=False)
             return {
                 "id": container.id[:12],
                 "name": container.name,
                 "status": container.status,
-                "image": container.image.tags[0] if container.image.tags else container.short_id,
-                "created": container_info.get("Created", ""),
-                "cpu_usage": stats.get("cpu_stats", {}).get("cpu_usage", {}).get("total_usage", 0),
+                "image": self.image,
+                "created": container.attrs.get("Created", ""),
                 "memory_usage": stats.get("memory_stats", {}).get("usage", 0),
                 "memory_limit": stats.get("memory_stats", {}).get("limit", 0),
             }
-        except Exception as e:
-            logger.error(f"Error getting container info: {e}")
-            return {"error": str(e)}
-    
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
     async def destroy_sandbox(self, session_id: str) -> bool:
-        """
-        Destroy a sandbox container and clean up resources.
-        
-        Args:
-            session_id: Sandbox session to destroy
-            
-        Returns:
-            True if successfully destroyed
-        """
-        if session_id not in self.containers:
-            logger.warning(f"No sandbox found for session: {session_id}")
+        container = self.containers.pop(session_id, None)
+        self._locks.pop(session_id, None)
+        if container is None:
             return False
-        
-        container = self.containers[session_id]
-        
         try:
-            logger.info(f"Destroying sandbox: session_id={session_id}, container_id={container.id[:12]}")
-            
-            # Stop container with grace period
-            container.stop(timeout=5)
-            
-            # Remove container
-            container.remove(force=True)
-            
-            # Remove from tracking
-            del self.containers[session_id]
-            
-            logger.info(f"Sandbox destroyed: session_id={session_id}")
+            await self._run(container.remove, force=True)
+            logger.info("Sandbox dihapus: %s", session_id)
             return True
-            
-        except Exception as e:
-            logger.error(f"Error destroying sandbox: {e}")
-            # Force remove if normal removal fails
-            try:
-                container.remove(force=True)
-                if session_id in self.containers:
-                    del self.containers[session_id]
-            except Exception:
-                pass
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Gagal menghapus sandbox %s: %s", session_id, exc)
             return False
-    
+
     async def destroy_all(self):
-        """Destroy all active sandbox containers."""
-        session_ids = list(self.containers.keys())
-        for session_id in session_ids:
+        for session_id in list(self.containers.keys()):
             await self.destroy_sandbox(session_id)
-    
-    def _get_container(self, session_id: str = None) -> Container:
-        """Get container for a session, raising error if not found."""
-        if session_id is None:
-            if not self.containers:
-                raise RuntimeError("No active sandbox sessions")
-            session_id = list(self.containers.keys())[0]
-        
-        if session_id not in self.containers:
-            raise RuntimeError(f"Sandbox not found for session: {session_id}")
-        
-        container = self.containers[session_id]
-        
-        # Verify container is still running
+
+        # Bersihkan container yatim dari run sebelumnya
         try:
-            container.reload()
-            if container.status != "running":
-                raise RuntimeError(f"Sandbox container is not running (status: {container.status})")
-        except Exception as e:
-            raise RuntimeError(f"Sandbox container check failed: {str(e)}")
-        
-        return container
-    
+            leftovers = await self._run(
+                self.client.containers.list,
+                all=True,
+                filters={"label": "app=autonomous-agent"},
+            )
+            for container in leftovers:
+                try:
+                    await self._run(container.remove, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
     def list_active_sessions(self) -> list:
-        """List all active sandbox sessions."""
         sessions = []
         for session_id, container in self.containers.items():
             try:
                 container.reload()
-                sessions.append({
+                status = container.status
+            except Exception:  # noqa: BLE001
+                status = "error"
+            sessions.append(
+                {
                     "session_id": session_id,
                     "container_id": container.id[:12],
-                    "status": container.status,
-                    "image": self.image
-                })
-            except Exception:
-                sessions.append({
-                    "session_id": session_id,
-                    "status": "error",
-                    "image": self.image
-                })
+                    "status": status,
+                    "image": self.image,
+                }
+            )
         return sessions
-    
-    def __del__(self):
-        """Cleanup on garbage collection."""
-        # Note: This is not reliable for cleanup
-        # Use destroy_all() explicitly
-        pass
+
+    # ──────────────────────────────────────────────────────────────
+    def _resolve_session(self, session_id: Optional[str]) -> str:
+        if session_id and session_id in self.containers:
+            return session_id
+        if session_id:
+            raise SandboxError(f"Sandbox tidak ditemukan untuk session: {session_id}")
+        if not self.containers:
+            raise SandboxError("Tidak ada sandbox aktif")
+        return next(iter(self.containers))
+
+    async def _get_container(self, session_id: str) -> Container:
+        container = self.containers.get(session_id)
+        if container is None:
+            raise SandboxError(f"Sandbox tidak ditemukan untuk session: {session_id}")
+        try:
+            await self._run(container.reload)
+        except Exception as exc:  # noqa: BLE001
+            raise SandboxError(f"Gagal memeriksa container: {exc}") from exc
+
+        if container.status != "running":
+            try:
+                await self._run(container.start)
+                await self._run(container.reload)
+            except Exception as exc:  # noqa: BLE001
+                raise SandboxError(f"Container sandbox tidak berjalan ({container.status}): {exc}") from exc
+        return container

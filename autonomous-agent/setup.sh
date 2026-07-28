@@ -1,503 +1,205 @@
 #!/bin/bash
-
 # ──────────────────────────────────────────────────────────────────────
-# Autonomous AI Agent - Automated Setup Script
-# Auto-install semua dependencies, pull model, dan jalankan sistem
+# Autonomous AI Agent - Setup untuk Linux (Ubuntu/Debian, Fedora, Arch)
+#
+# Yang dilakukan:
+#   1. Cek/instal Docker Engine + plugin compose
+#   2. Siapkan file .env (model: dolphin-llama3:8b)
+#   3. Pre-pull image ubuntu:22.04 untuk sandbox
+#   4. Build & jalankan semua service
+#   5. Pull model dolphin-llama3:8b (~4.7GB)
+#   6. Verifikasi end-to-end (Ollama -> Backend -> Frontend -> Sandbox)
 # ──────────────────────────────────────────────────────────────────────
 
-set -e
+set -euo pipefail
 
-# ── Colors & Formatting ───────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-BOLD='\033[1m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+cd "$SCRIPT_DIR"
 
-# ── Configuration ─────────────────────────────────────────────────────
-MODEL_NAME="hf.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Q4_K_M"
-OLLAMA_CONTAINER="agent-ollama"
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="${PROJECT_DIR}/setup.log"
+SKIP_MODEL=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-model) SKIP_MODEL=1 ;;
+    -h|--help)
+      echo "Usage: ./setup.sh [--skip-model]"
+      exit 0
+      ;;
+  esac
+done
 
-# ── Helper Functions ──────────────────────────────────────────────────
-log() {
-    echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-warn() {
-    echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-error() {
-    echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-info() {
-    echo -e "${BLUE}[i]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-header() {
-    echo -e "\n${PURPLE}${BOLD}═══════════════════════════════════════════════════════════${NC}" | tee -a "$LOG_FILE"
-    echo -e "${PURPLE}${BOLD}  $1${NC}" | tee -a "$LOG_FILE"
-    echo -e "${PURPLE}${BOLD}═══════════════════════════════════════════════════════════${NC}" | tee -a "$LOG_FILE"
-}
-
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " ${CYAN}[%c]${NC} $2" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\r"
-    done
-    printf "    \r"
-}
-
-check_command() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-# ── Docker Compose Detection ──────────────────────────────────────────
-# Detect if using 'docker compose' (v2) or 'docker-compose' (v1)
-get_docker_compose() {
-    if docker compose version >/dev/null 2>&1; then
-        echo "docker compose"
-    elif docker-compose version >/dev/null 2>&1; then
-        echo "docker-compose"
-    else
-        # Default to 'docker compose' for new installations
-        echo "docker compose"
-    fi
-}
-DOCKER_COMPOSE=$(get_docker_compose)
-
-# ── System Detection ──────────────────────────────────────────────────
-detect_os() {
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if check_command apt-get; then
-            OS="ubuntu"
-        elif check_command dnf; then
-            OS="fedora"
-        elif check_command pacman; then
-            OS="arch"
-        else
-            OS="linux"
-        fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        OS="macos"
-    else
-        error "Unsupported OS: $OSTYPE"
-        exit 1
-    fi
-    log "Detected OS: ${BOLD}$OS${NC}"
-}
-
-# ── Installation Functions ────────────────────────────────────────────
-install_docker() {
-    header "Installing Docker"
-    
-    if check_command docker; then
-        log "Docker already installed: $(docker --version)"
-        return 0
-    fi
-    
-    info "Installing Docker..."
-    
-    case $OS in
-        ubuntu)
-            # Remove old versions
-            sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-            
-            # Install prerequisites
-            sudo apt-get update
-            sudo apt-get install -y \
-                apt-transport-https \
-                ca-certificates \
-                curl \
-                gnupg \
-                lsb-release
-            
-            # Add Docker's official GPG key
-            sudo install -m 0755 -d /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            sudo chmod a+r /etc/apt/keyrings/docker.gpg
-            
-            # Set up repository
-            echo \
-              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-              $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-              sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
-            # Install Docker Engine
-            sudo apt-get update
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            
-            # Add user to docker group
-            sudo usermod -aG docker $USER
-            warn "Added $USER to docker group. You may need to log out and back in for this to take effect."
-            ;;
-            
-        fedora)
-            sudo dnf -y install dnf-plugins-core
-            sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-            sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            sudo systemctl start docker
-            sudo systemctl enable docker
-            sudo usermod -aG docker $USER
-            ;;
-            
-        arch)
-            sudo pacman -Sy --noconfirm docker docker-compose
-            sudo systemctl start docker
-            sudo systemctl enable docker
-            sudo usermod -aG docker $USER
-            ;;
-            
-        macos)
-            if check_command brew; then
-                brew install --cask docker
-            else
-                error "Please install Docker Desktop manually from https://docker.com/products/docker-desktop"
-                exit 1
-            fi
-            ;;
-    esac
-    
-    # Start Docker service
-    if [[ "$OS" != "macos" ]]; then
-        sudo systemctl start docker 2>/dev/null || true
-        sudo systemctl enable docker 2>/dev/null || true
-    fi
-
-    # Update DOCKER_COMPOSE after potential installation
-    DOCKER_COMPOSE=$(get_docker_compose)
-    
-    # Verify installation
-    if check_command docker; then
-        log "Docker installed successfully: $(docker --version)"
-    else
-        error "Docker installation failed"
-        exit 1
-    fi
-}
-
-install_nodejs() {
-    header "Installing Node.js"
-    
-    if check_command node; then
-        NODE_VERSION=$(node --version)
-        log "Node.js already installed: $NODE_VERSION"
-        
-        # Check version
-        MAJOR_VERSION=$(echo $NODE_VERSION | cut -d'v' -f2 | cut -d'.' -f1)
-        if [ "$MAJOR_VERSION" -lt 18 ]; then
-            warn "Node.js version $NODE_VERSION is too old. Need v18+"
-        else
-            return 0
-        fi
-    fi
-    
-    info "Installing Node.js v20 LTS..."
-    
-    case $OS in
-        ubuntu)
-            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-            sudo apt-get install -y nodejs
-            ;;
-            
-        fedora)
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-            sudo dnf install -y nodejs
-            ;;
-            
-        arch)
-            sudo pacman -Sy --noconfirm nodejs npm
-            ;;
-            
-        macos)
-            if check_command brew; then
-                brew install node@20
-                brew link --overwrite node@20
-            else
-                error "Please install Node.js manually from https://nodejs.org"
-                exit 1
-            fi
-            ;;
-    esac
-    
-    if check_command node; then
-        log "Node.js installed successfully: $(node --version)"
-    else
-        error "Node.js installation failed"
-        exit 1
-    fi
-}
-
-install_ollama() {
-    header "Installing Ollama"
-    
-    # Check if Ollama is running in Docker
-    if docker ps --format '{{.Names}}' | grep -q "$OLLAMA_CONTAINER"; then
-        log "Ollama already running in Docker container"
-        return 0
-    fi
-    
-    # Check if Ollama is installed locally
-    if check_command ollama; then
-        log "Ollama already installed locally: $(ollama --version)"
-        return 0
-    fi
-    
-    info "Ollama will be run via Docker (no local installation needed)"
-}
-
-# ── Model Management ──────────────────────────────────────────────────
-pull_model() {
-    header "Pulling LLM Model"
-    
-    info "Model: ${BOLD}$MODEL_NAME${NC}"
-    info "This may take 10-30 minutes depending on your internet speed..."
-    info "Model size: ~7.5GB (Q4_K_M quantization)"
-    
-    # Wait for Ollama to be ready
-    info "Waiting for Ollama service to be ready..."
-    for i in {1..30}; do
-        if docker exec $OLLAMA_CONTAINER ollama list >/dev/null 2>&1; then
-            log "Ollama service is ready"
-            break
-        fi
-        if [ $i -eq 30 ]; then
-            error "Ollama service failed to start"
-            exit 1
-        fi
-        sleep 2
-    done
-    
-    # Check if model already exists
-    if docker exec $OLLAMA_CONTAINER ollama list 2>/dev/null | grep -q "HauhauCS"; then
-        log "Model already pulled"
-        return 0
-    fi
-    
-    # Pull the model
-    info "Pulling model from HuggingFace..."
-    docker exec -it $OLLAMA_CONTAINER ollama pull "$MODEL_NAME"
-    
-    if [ $? -eq 0 ]; then
-        log "Model pulled successfully!"
-    else
-        error "Failed to pull model"
-        exit 1
-    fi
-}
-
-# ── Project Setup ─────────────────────────────────────────────────────
-setup_project() {
-    header "Setting Up Project"
-    
-    cd "$PROJECT_DIR"
-    
-    # Update .env with correct model name
-    info "Configuring environment variables..."
-    if [ -f .env ]; then
-        sed -i.bak "s|^LLM_MODEL=.*|LLM_MODEL=$MODEL_NAME|" .env
-        sed -i.bak "s|^LLM_BASE_URL=.*|LLM_BASE_URL=http://ollama:11434/v1|" .env
-        rm -f .env.bak
-        log "Environment configured"
-    else
-        error ".env file not found"
-        exit 1
-    fi
-    
-    # Install frontend dependencies
-    info "Installing frontend dependencies..."
-    cd frontend
-    if check_command npm; then
-        npm install
-        log "Frontend dependencies installed"
-    else
-        error "npm not found"
-        exit 1
-    fi
-    cd ..
-    
-    # Install backend dependencies
-    info "Installing backend dependencies..."
-    cd backend
-    if check_command pip3; then
-        pip3 install -r requirements.txt
-        log "Backend dependencies installed"
-    else
-        warn "pip3 not found - will install in Docker container"
-    fi
-    cd ..
-}
-
-# ── Build & Start Services ────────────────────────────────────────────
-start_services() {
-    header "Building and Starting Services"
-    
-    cd "$PROJECT_DIR"
-    
-    # Build Docker images
-    info "Building Docker images..."
-    $DOCKER_COMPOSE build --no-cache
-    
-    # Start services
-    info "Starting services..."
-    $DOCKER_COMPOSE up -d
-    
-    # Wait for services to be healthy
-    info "Waiting for services to start..."
-    sleep 10
-    
-    # Check health
-    for i in {1..30}; do
-        if curl -s http://localhost:8000/health >/dev/null 2>&1; then
-            log "Backend service is healthy"
-            break
-        fi
-        if [ $i -eq 30 ]; then
-            warn "Backend service may not be ready yet. Check logs with: $DOCKER_COMPOSE logs backend"
-        fi
-        sleep 2
-    done
-    
-    for i in {1..10}; do
-        if curl -s http://localhost:3000 >/dev/null 2>&1; then
-            log "Frontend service is healthy"
-            break
-        fi
-        if [ $i -eq 10 ]; then
-            warn "Frontend service may not be ready yet. Check logs with: $DOCKER_COMPOSE logs frontend"
-        fi
-        sleep 2
-    done
-}
-
-# ── Verification ──────────────────────────────────────────────────────
-verify_setup() {
-    header "Verifying Setup"
-    
-    # Check Docker
-    if docker ps | grep -q "$OLLAMA_CONTAINER"; then
-        log "✓ Ollama container is running"
-    else
-        error "✗ Ollama container is not running"
-        return 1
-    fi
-    
-    # Check Backend
-    if curl -s http://localhost:8000/health | grep -q "ok"; then
-        log "✓ Backend API is accessible"
-    else
-        warn "! Backend API may not be ready yet"
-    fi
-    
-    # Check Frontend
-    if curl -s http://localhost:3000 >/dev/null 2>&1; then
-        log "✓ Frontend is accessible"
-    else
-        warn "! Frontend may not be ready yet"
-    fi
-    
-    # Check Model
-    if docker exec $OLLAMA_CONTAINER ollama list 2>/dev/null | grep -q "HauhauCS"; then
-        log "✓ LLM model is loaded"
-    else
-        warn "! LLM model may not be loaded yet"
-    fi
-    
-    echo ""
-}
-
-# ── Main Setup Flow ───────────────────────────────────────────────────
-main() {
-    # Clear log file
-    > "$LOG_FILE"
-    
-    header "Autonomous AI Agent - Automated Setup"
-    
-    echo -e "${CYAN}${BOLD}"
-    cat << "EOF"
+echo -e "${BLUE}${BOLD}"
+cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
-    ║                                                           ║
-    ║   🤖  AUTONOMOUS AI AGENT - AUTO SETUP                   ║
-    ║                                                           ║
-    ║   This script will:                                       ║
-    ║   1. Install Docker (if not installed)                   ║
-    ║   2. Install Node.js (if not installed)                  ║
-    ║   3. Pull Gemma4-12B Uncensored Model                    ║
-    ║   4. Build and start all services                        ║
-    ║   5. Verify everything is working                        ║
-    ║                                                           ║
+    ║        🐬  AUTONOMOUS AI AGENT - SETUP (LINUX)            ║
+    ║        Model: dolphin-llama3:8b via Ollama                ║
     ╚═══════════════════════════════════════════════════════════╝
 EOF
-    echo -e "${NC}"
-    
-    # Detect OS
-    detect_os
-    
-    # Install dependencies
-    install_docker
-    install_nodejs
-    install_ollama
-    
-    # Setup project
-    setup_project
-    
-    # Build and start
-    start_services
-    
-    # Pull model (after Ollama is running)
-    pull_model
-    
-    # Verify
-    verify_setup
-    
-    # Final message
-    header "Setup Complete!"
-    
-    echo -e "${GREEN}${BOLD}"
-    cat << "EOF"
+echo -e "${NC}"
+
+# ── 1. Deteksi OS ─────────────────────────────────────────────────────
+header "1/6 Deteksi sistem"
+if [[ "$(uname -s)" != "Linux" ]]; then
+  error "Skrip ini khusus Linux. Terdeteksi: $(uname -s)"
+  exit 1
+fi
+
+OS="linux"
+if has apt-get; then OS="debian"
+elif has dnf; then OS="fedora"
+elif has pacman; then OS="arch"
+fi
+log "OS: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -sr) (family: $OS)"
+log "Arsitektur: $(uname -m)"
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if has sudo; then SUDO="sudo"; else
+    error "Butuh root atau sudo untuk instalasi paket."
+    exit 1
+  fi
+fi
+
+# ── 2. Docker ─────────────────────────────────────────────────────────
+header "2/6 Docker Engine & Compose"
+if has docker; then
+  log "Docker terpasang: $(docker --version)"
+else
+  info "Menginstal Docker Engine..."
+  case "$OS" in
+    debian)
+      $SUDO apt-get update -qq
+      $SUDO apt-get install -y -qq ca-certificates curl gnupg
+      $SUDO install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | $SUDO gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+      $SUDO chmod a+r /etc/apt/keyrings/docker.gpg
+      . /etc/os-release
+      DISTRO_ID="${ID}"
+      [ "$DISTRO_ID" != "ubuntu" ] && [ "$DISTRO_ID" != "debian" ] && DISTRO_ID="ubuntu"
+      CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-jammy}}"
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DISTRO_ID} ${CODENAME} stable" \
+        | $SUDO tee /etc/apt/sources.list.d/docker.list > /dev/null
+      $SUDO apt-get update -qq
+      $SUDO apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+      ;;
+    fedora)
+      $SUDO dnf -y install dnf-plugins-core
+      $SUDO dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+      $SUDO dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+    arch)
+      $SUDO pacman -Sy --noconfirm docker docker-compose
+      ;;
+    *)
+      error "Distro tidak dikenal. Instal Docker manual: https://docs.docker.com/engine/install/"
+      exit 1
+      ;;
+  esac
+  $SUDO systemctl enable --now docker || true
+  log "Docker terinstal"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  info "Menyalakan service docker..."
+  $SUDO systemctl start docker || true
+  sleep 2
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  warn "User $(whoami) belum bisa akses Docker daemon."
+  info "Menambahkan user ke grup docker..."
+  $SUDO usermod -aG docker "$USER" || true
+  error "Logout/login ulang (atau jalankan: newgrp docker) lalu ulangi ./setup.sh"
+  exit 1
+fi
+log "Docker daemon OK"
+
+DOCKER_COMPOSE="$(detect_compose)"
+if [ -z "$DOCKER_COMPOSE" ]; then
+  info "Menginstal docker compose plugin..."
+  case "$OS" in
+    debian) $SUDO apt-get install -y -qq docker-compose-plugin ;;
+    fedora) $SUDO dnf -y install docker-compose-plugin ;;
+    arch)   $SUDO pacman -Sy --noconfirm docker-compose ;;
+  esac
+  DOCKER_COMPOSE="$(detect_compose)"
+fi
+[ -z "$DOCKER_COMPOSE" ] && { error "docker compose tidak tersedia"; exit 1; }
+log "Compose: $DOCKER_COMPOSE"
+
+# ── 3. Konfigurasi ────────────────────────────────────────────────────
+header "3/6 Konfigurasi (.env)"
+if [ ! -f .env ]; then
+  cp .env.example .env
+  log ".env dibuat dari .env.example"
+else
+  log ".env sudah ada (dipertahankan)"
+fi
+load_env
+MODEL="$(model_name)"
+info "Model LLM      : $MODEL"
+info "Sandbox image  : ${SANDBOX_IMAGE:-ubuntu:22.04}"
+
+# ── 4. Image sandbox ──────────────────────────────────────────────────
+header "4/6 Menyiapkan image sandbox"
+SANDBOX_IMG="${SANDBOX_IMAGE:-ubuntu:22.04}"
+if docker image inspect "$SANDBOX_IMG" >/dev/null 2>&1; then
+  log "Image $SANDBOX_IMG sudah tersedia"
+else
+  info "Pull $SANDBOX_IMG ..."
+  docker pull "$SANDBOX_IMG"
+  log "Image sandbox siap"
+fi
+
+# ── 5. Build & start ──────────────────────────────────────────────────
+header "5/6 Build & menjalankan service"
+$DOCKER_COMPOSE build
+$DOCKER_COMPOSE up -d ollama
+info "Menunggu Ollama siap..."
+for i in $(seq 1 60); do
+  if docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1; then
+    log "Ollama siap"
+    break
+  fi
+  [ "$i" -eq 60 ] && { error "Ollama tidak siap"; $DOCKER_COMPOSE logs --tail 40 ollama; exit 1; }
+  sleep 2
+done
+
+if [ "$SKIP_MODEL" -eq 0 ]; then
+  if docker exec "$OLLAMA_CONTAINER" ollama list 2>/dev/null | grep -q "dolphin-llama3"; then
+    log "Model $MODEL sudah ada"
+  else
+    info "Pull model $MODEL (~4.7GB) — bisa 5-30 menit..."
+    docker exec "$OLLAMA_CONTAINER" ollama pull "$MODEL"
+    log "Model siap"
+  fi
+else
+  warn "Pull model dilewati (--skip-model). Jalankan ./pull-model.sh nanti."
+fi
+
+$DOCKER_COMPOSE up -d backend frontend
+info "Menunggu backend & frontend..."
+sleep 5
+
+# ── 6. Verifikasi ─────────────────────────────────────────────────────
+header "6/6 Verifikasi"
+"${SCRIPT_DIR}/test.sh" || warn "Beberapa test gagal — cek ./logs.sh"
+
+echo -e "${GREEN}${BOLD}"
+cat << "EOF"
     ╔═══════════════════════════════════════════════════════════╗
+    ║   ✅  SETUP SELESAI                                       ║
     ║                                                           ║
-    ║   ✅  SETUP SUCCESSFUL!                                   ║
+    ║   🌐  Frontend : http://localhost:3000                    ║
+    ║   🔧  Backend  : http://localhost:8000/health             ║
+    ║   🤖  Ollama   : http://localhost:11434                   ║
     ║                                                           ║
-    ║   🌐  Frontend:  http://localhost:3000                   ║
-    ║   🔧  Backend:   http://localhost:8000                   ║
-    ║   📚  API Docs:  http://localhost:8000/docs              ║
-    ║   🤖  Ollama:    http://localhost:11434                  ║
-    ║                                                           ║
-    ║   📖  Open your browser and go to:                       ║
-    ║       http://localhost:3000                              ║
-    ║                                                           ║
-    ║   📝  To view logs:                                      ║
-    ║       $DOCKER_COMPOSE logs -f                             ║
-    ║                                                           ║
-    ║   🛑  To stop:                                           ║
-    ║       $DOCKER_COMPOSE down                                ║
-    ║                                                           ║
+    ║   ./quick-start.sh  start      ./stop.sh   stop           ║
+    ║   ./status.sh       status     ./logs.sh   logs           ║
+    ║   ./test.sh         self-test  ./pull-model.sh  model     ║
     ╚═══════════════════════════════════════════════════════════╝
 EOF
-    echo -e "${NC}"
-    
-    # Open browser (if possible)
-    if [[ "$OS" == "macos" ]]; then
-        open http://localhost:3000 2>/dev/null || true
-    elif [[ "$OS" == "ubuntu" ]] || [[ "$OS" == "fedora" ]] || [[ "$OS" == "arch" ]]; then
-        if check_command xdg-open; then
-            xdg-open http://localhost:3000 2>/dev/null || true
-        fi
-    fi
-}
-
-# Run main function
-main "$@"
+echo -e "${NC}"

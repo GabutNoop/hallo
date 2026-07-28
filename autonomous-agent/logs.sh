@@ -1,41 +1,21 @@
 #!/bin/bash
-
 # ──────────────────────────────────────────────────────────────────────
-# Logs Script - View real-time logs
+# Lihat log service. Pakai: ./logs.sh [all|backend|frontend|ollama] [-n N]
 # ──────────────────────────────────────────────────────────────────────
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+cd "$SCRIPT_DIR"
 
-set -e
+require_docker
+DOCKER_COMPOSE="$(detect_compose)"
 
-# Colors
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_DIR"
-
-# Detect $DOCKER_COMPOSE command
-DOCKER_COMPOSE="docker compose"
-if ! docker compose version >/dev/null 2>&1; then
-    DOCKER_COMPOSE="$DOCKER_COMPOSE"
-fi
-
-# Parse arguments
 SERVICE="${1:-all}"
+TAIL="${3:-200}"
 
-echo -e "${BLUE}[i]${NC} Viewing logs for: ${SERVICE}"
-echo -e "${YELLOW}[i]${NC} Press Ctrl+C to exit"
-echo ""
-
-if [ "$SERVICE" = "all" ]; then
-    $DOCKER_COMPOSE logs -f
-elif [ "$SERVICE" = "backend" ]; then
-    $DOCKER_COMPOSE logs -f backend
-elif [ "$SERVICE" = "frontend" ]; then
-    $DOCKER_COMPOSE logs -f frontend
-elif [ "$SERVICE" = "ollama" ]; then
-    $DOCKER_COMPOSE logs -f ollama
-else
-    echo "Usage: $0 [all|backend|frontend|ollama]"
-    exit 1
-fi
+case "$SERVICE" in
+  all)      info "Log semua service (Ctrl+C untuk keluar)"; $DOCKER_COMPOSE logs -f --tail "$TAIL" ;;
+  backend|frontend|ollama)
+            info "Log $SERVICE (Ctrl+C untuk keluar)"; $DOCKER_COMPOSE logs -f --tail "$TAIL" "$SERVICE" ;;
+  *)        echo "Usage: $0 [all|backend|frontend|ollama] [-n TAIL]"; exit 1 ;;
+esac

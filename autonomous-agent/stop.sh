@@ -1,32 +1,33 @@
 #!/bin/bash
-
 # ──────────────────────────────────────────────────────────────────────
-# Stop Script - Stop all services
+# Stop semua service + bersihkan container sandbox yatim
+# Pakai: ./stop.sh [--volumes]
 # ──────────────────────────────────────────────────────────────────────
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+cd "$SCRIPT_DIR"
 
-set -e
+require_docker
+DOCKER_COMPOSE="$(detect_compose)"
 
-# Colors
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_DIR"
-
-# Detect $DOCKER_COMPOSE command
-DOCKER_COMPOSE="docker compose"
-if ! docker compose version >/dev/null 2>&1; then
-    DOCKER_COMPOSE="$DOCKER_COMPOSE"
+info "Menghentikan service..."
+if [ "${1:-}" = "--volumes" ]; then
+  warn "Menghapus volume (model Ollama ikut terhapus)"
+  $DOCKER_COMPOSE down -v --remove-orphans
+else
+  $DOCKER_COMPOSE down --remove-orphans
 fi
 
-echo -e "${BLUE}[i]${NC} Stopping all services..."
+info "Membersihkan container sandbox..."
+SANDBOXES="$(docker ps -aq --filter 'label=app=autonomous-agent' || true)"
+if [ -n "$SANDBOXES" ]; then
+  # shellcheck disable=SC2086
+  docker rm -f $SANDBOXES >/dev/null 2>&1 || true
+  log "Sandbox dibersihkan"
+else
+  log "Tidak ada sandbox tersisa"
+fi
 
-# Stop containers
-$DOCKER_COMPOSE down
-
-echo -e "${GREEN}[✓]${NC} All services stopped"
-echo ""
-echo -e "${YELLOW}[i]${NC} To start again, run: ./quick-start.sh"
-echo ""
+log "Semua service berhenti"
+info "Start lagi dengan: ./quick-start.sh"
