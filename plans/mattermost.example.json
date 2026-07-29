@@ -1,0 +1,11 @@
+{
+  "program": "mattermost",
+  "requests": [
+    {
+      "name": "local-system-ping-baseline",
+      "method": "GET",
+      "url": "http://127.0.0.1:8065/api/v4/system/ping",
+      "expected_observation": "Record a baseline response from the researcher-owned local instance only."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+# TAB Bug Bounty Copilot
+.env
+.tools/
+multi_program_config.yaml
+plans/mattermost.json
+plans/files.json
+plans/amazon.json
+multi_evidence/
+evidence/
+*.har
+*burp*capture*.json
+*.log
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.venv/
+*.py[cod]
+
+# Common local files
+.DS_Store
