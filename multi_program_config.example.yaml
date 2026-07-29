@@ -1,0 +1,69 @@
+version: 1
+
+global:
+  # Official PortSwigger MCP Server extension. Loopback only.
+  burp_mcp_endpoint: http://127.0.0.1:9876/sse
+  mcp_timeout_seconds: 15
+  audit_dir: ./multi_evidence
+  duplicate_db: ./multi_evidence/duplicate_registry.sqlite3
+  concurrent_workers: 3
+  require_start_confirmation: true
+
+  # Optional AI plan generation. The planner cannot execute tools and every
+  # generated request must pass the deterministic policy engine.
+  llm:
+    endpoint: https://api.anthropic.com/v1/messages
+    api_key_env: AGENT_API_KEY
+    auth_mode: anthropic
+    model: claude-3-5-sonnet-latest
+    max_tokens: 2000
+    temperature: 0.1
+
+programs:
+  mattermost:
+    enabled: true
+    display_name: Mattermost self-hosted
+    mode: self_hosted_only
+    # Autonomous active testing is restricted to your own loopback instance.
+    base_url: http://127.0.0.1:8065
+    hackerone_username: YOUR_H1_USERNAME
+    test_email: YOUR_H1_USERNAME@wearehackerone.com
+    required_user_agent: H1Research/YOUR_H1_USERNAME
+    max_requests_per_second: 2.0
+    request_budget: 40
+    allowed_methods: [GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE]
+    # AI plans may use only these previously observed/owned URLs.
+    known_urls:
+      - http://127.0.0.1:8065/api/v4/system/ping
+
+  files:
+    enabled: true
+    display_name: Files.com assigned trial site
+    mode: bounded_production
+    # Fill this after creating a trial with Company Name containing [BUGBOUNTY].
+    assigned_host: YOUR-ASSIGNED-SUBDOMAIN.files.com
+    hackerone_username: YOUR_H1_USERNAME
+    test_email: YOUR_H1_USERNAME@wearehackerone.com
+    required_user_agent: H1Research/YOUR_H1_USERNAME
+    company_name_must_contain: '[BUGBOUNTY]'
+    max_requests_per_second: 1.0
+    hard_program_max_rps: 2.0
+    request_budget: 20
+    # Remote autonomous mode is read-only. State-changing tests stay manual.
+    allowed_methods: [GET, HEAD, OPTIONS]
+    known_urls: []
+
+  amazon:
+    enabled: true
+    display_name: Amazon VRP selected marketplace
+    mode: bounded_production
+    # Select one exact in-scope marketplace host; do not use a wildcard.
+    marketplace_host: www.amazon.com
+    hackerone_username: YOUR_H1_USERNAME
+    test_email: YOUR_H1_USERNAME@wearehackerone.com
+    required_user_agent: amazonvrpresearcher_YOUR_H1_USERNAME
+    max_requests_per_second: 1.0
+    hard_program_max_rps: 5.0
+    request_budget: 20
+    allowed_methods: [GET, HEAD, OPTIONS]
+    known_urls: []

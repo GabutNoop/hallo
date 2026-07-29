@@ -1,0 +1,87 @@
+agent:
+  name: TAB-BugBounty-Copilot
+  version: 4.0.0
+  mode: human-in-the-loop
+  language: id
+  report_language: en
+  dry_run: true
+  require_confirmation: true
+  max_tokens: 2000
+  temperature: 0.2
+  log_level: INFO
+  log_file: tab_agent.log
+
+provider:
+  # Official Anthropic endpoint by default. A custom provider is opt-in and
+  # its hostname is displayed before every approved outbound request.
+  endpoint: https://api.anthropic.com/v1/messages
+  api_key_env: AGENT_API_KEY
+  auth_mode: anthropic
+  model: claude-3-5-sonnet-latest
+  timeout_seconds: 60
+  retry_max: 3
+  retry_delay_seconds: 2.0
+
+burp_mcp:
+  # PortSwigger's official MCP Server extension. Loopback endpoints only.
+  # The copilot adapter cannot invoke request-sending, Intruder, Collaborator,
+  # config-editing, or editor-writing tools.
+  enabled: true
+  endpoint: http://127.0.0.1:9876/sse
+  timeout_seconds: 10
+  max_history_items: 20
+  allowed_tools:
+    - get_organizer_items_regex
+    - get_proxy_http_history_regex
+
+program:
+  name: Thüringer Aufbaubank Bug Bounty
+  platform: YesWeHack
+  last_known_update: '2025-02-11'
+  report_deadline_hours: 24
+  public_disclosure: false
+  required_user_agent_suffix: -BugBounty-TA-31337
+
+  # Conservative local guardrail. The supplied program text requires limiting
+  # requests but does not state a numeric ceiling; do not present this value as
+  # an official published program limit.
+  tool_safety:
+    requests_per_second: 0.2
+    concurrency: 1
+
+  scope:
+    allowed_domains:
+      - thueringer-foerderportal.eu
+      - login.aufbaubank.de
+    # Every unlisted domain and every third party is out of scope.
+    allow_subdomains: false
+    allow_non_default_ports: false
+
+  rewards:
+    low: 50
+    medium: 200
+    high: 2000
+    critical: 7000
+
+  systemic_reward_percentages:
+    1: 1.0
+    2: 1.0
+    3: 0.75
+    4: 0.5
+    5: 0.25
+    6: 0.1  # Applies to report 6 and later.
+
+  credential_leaks:
+    source_values:
+      - in_scope
+      - organization_out_of_scope
+      - third_party_out_of_scope
+      - not_applicable
+    impact_values:
+      - in_scope
+      - out_of_scope
+      - not_applicable
+
+  evidence:
+    base_dir: ./evidence
+    redact_pii: true
